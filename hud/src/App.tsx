@@ -5,7 +5,7 @@ import { TelemetryBar } from "./components/TelemetryBar";
 import { TranscriptDrawer } from "./components/TranscriptDrawer";
 import { ApprovalModal } from "./components/ApprovalModal";
 import { Sliders, Play, Volume2, ShieldAlert } from "lucide-react";
-import type { AlfredStatus } from "./types";
+import type { AlfredStatus, LayoutMode } from "./types";
 
 export function App() {
   const {
@@ -33,26 +33,50 @@ export function App() {
   const isElectron = typeof window !== "undefined" && Boolean(getElectronBridge());
   const [showSimControls, setShowSimControls] = useState<boolean>(!isElectron);
   const [clickThroughLocked, setClickThroughLocked] = useState<boolean>(false);
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>("cinema");
+  const [stealthEnabled, setStealthEnabled] = useState<boolean>(true);
 
-  // Toggle-to-Talk via Electron IPC or browser Ctrl+Space
+  const toggleLayoutMode = useCallback(() => {
+    setLayoutMode((prev) => (prev === "cinema" ? "docked" : "cinema"));
+  }, []);
+
+  const toggleStealth = useCallback(() => {
+    setStealthEnabled((prev) => {
+      const next = !prev;
+      const electron = getElectronBridge();
+      if (electron?.setContentProtection) {
+        electron.setContentProtection(next);
+      }
+      return next;
+    });
+  }, []);
+
+  // Global hotkeys (Ctrl+Space for Mic, Ctrl+Shift+A for Layout Mode)
   useEffect(() => {
     const electron = getElectronBridge();
-    if (electron?.onPttTriggered) {
-      const unsubscribe = electron.onPttTriggered(() => {
-        toggleMic();
-      });
-      return unsubscribe;
-    }
+    const unsubPtt = electron?.onPttTriggered?.(() => {
+      toggleMic();
+    });
+    const unsubLayout = electron?.onToggleLayoutMode?.(() => {
+      toggleLayoutMode();
+    });
 
     const handleKeyDown = (e: globalThis.KeyboardEvent) => {
       if (e.ctrlKey && e.code === "Space") {
         e.preventDefault();
         toggleMic();
+      } else if (e.ctrlKey && e.shiftKey && (e.code === "KeyA" || e.key === "A" || e.key === "a")) {
+        e.preventDefault();
+        toggleLayoutMode();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [toggleMic]);
+    return () => {
+      unsubPtt?.();
+      unsubLayout?.();
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [toggleMic, toggleLayoutMode]);
 
   // Mouse event IPC forwarder for Electron transparent overlay
   const handlePanelMouseEnter = useCallback(() => {
@@ -131,41 +155,70 @@ export function App() {
           connected={connected}
           micActive={micActive}
           clickThroughLocked={clickThroughLocked}
+          layoutMode={layoutMode}
+          stealthEnabled={stealthEnabled}
           onToggleMic={toggleMic}
           onToggleClickThrough={toggleClickThrough}
+          onToggleLayout={toggleLayoutMode}
+          onToggleStealth={toggleStealth}
           onInspectScreen={sendInspectScreen}
           onMouseEnter={handlePanelMouseEnter}
           onMouseLeave={handlePanelMouseLeave}
         />
       </div>
 
-      {/* 2. Center 60 FPS Vanilla Three.js Gyroscope Orb */}
-      <div className="flex-1 flex flex-col items-center justify-center relative">
-        <div className="pointer-events-auto">
-          <AudioOrb
-            rmsVolume={state.rms_volume}
-            status={state.status}
-            size={320}
-          />
-        </div>
+      {/* 2. AudioOrb: Cinema Mode (Center) vs Compact Corner Dock (Bottom-Right) */}
+      {layoutMode === "cinema" ? (
+        <div className="flex-1 flex flex-col items-center justify-center relative">
+          <div className="pointer-events-auto">
+            <AudioOrb
+              rmsVolume={state.rms_volume}
+              status={state.status}
+              size={320}
+            />
+          </div>
 
-        {/* Ambient HUD Subtitle / Status Display */}
-        <div className="mt-3 flex items-center gap-2 pointer-events-none">
-          <span className="font-mono text-xs tracking-widest text-cyan-400/80 uppercase">
-            A.L.F.R.E.D.
-          </span>
-          <span className="text-slate-600">|</span>
-          <span className="font-mono text-xs tracking-widest text-slate-400 uppercase">
-            {state.status === "speaking"
-              ? "Synthesizing Vocal Response"
-              : state.status === "thinking"
-              ? "Executing Cognitive Reasoning"
-              : state.status === "listening"
-              ? "Acoustic Sensors Active"
-              : "Standing By"}
-          </span>
+          {/* Ambient HUD Subtitle / Status Display */}
+          <div className="mt-3 flex items-center gap-2 pointer-events-none">
+            <span className="font-mono text-xs tracking-widest text-cyan-400/80 uppercase">
+              A.L.F.R.E.D.
+            </span>
+            <span className="text-slate-600">|</span>
+            <span className="font-mono text-xs tracking-widest text-slate-400 uppercase">
+              {state.status === "speaking"
+                ? "Synthesizing Vocal Response"
+                : state.status === "thinking"
+                ? "Executing Cognitive Reasoning"
+                : state.status === "listening"
+                ? "Acoustic Sensors Active"
+                : "Standing By"}
+            </span>
+          </div>
         </div>
-      </div>
+      ) : (
+        <>
+          {/* In Docked Mode, center monitor remains 100% unobstructed for coding */}
+          <div className="flex-1" />
+
+          {/* Compact 180x180px Floating Glassmorphic Corner Dock */}
+          <aside
+            onMouseEnter={handlePanelMouseEnter}
+            onMouseLeave={handlePanelMouseLeave}
+            className="fixed bottom-28 right-8 z-30 pointer-events-auto p-2.5 rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-cyan-500/40 shadow-[0_8px_32px_rgba(0,0,0,0.7)] flex flex-col items-center justify-center transition-all duration-300"
+          >
+            <AudioOrb
+              rmsVolume={state.rms_volume}
+              status={state.status}
+              size={180}
+            />
+            <div className="flex items-center gap-1.5 mt-1 pointer-events-none font-mono text-[9px] tracking-widest text-cyan-400/90 uppercase">
+              <span>DOCKED</span>
+              <span className="text-slate-600">|</span>
+              <span className="text-slate-400 capitalize">{state.status}</span>
+            </div>
+          </aside>
+        </>
+      )}
 
       {/* 3. Bottom Scrolling Transcript Drawer with Simulation Toolbar */}
       <div className="w-full flex justify-center pointer-events-auto">

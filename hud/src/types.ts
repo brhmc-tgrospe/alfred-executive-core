@@ -1,4 +1,5 @@
 export type AlfredStatus = "idle" | "listening" | "thinking" | "speaking";
+export type LayoutMode = "cinema" | "docked";
 
 export interface PendingApproval {
   id: string;
@@ -29,7 +30,9 @@ export interface AlfredStatePacket {
 
 export interface ElectronAPI {
   setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => void;
+  setContentProtection?: (enable: boolean) => void;
   onPttTriggered?: (callback: () => void) => () => void;
+  onToggleLayoutMode?: (callback: () => void) => () => void;
 }
 
 declare global {

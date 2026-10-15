@@ -153,3 +153,31 @@ async def test_run_executive_loop_lifecycle(core_setup):
     await core.stop()
     await task
     assert core._loop_active is False
+
+
+@pytest.mark.asyncio
+async def test_send_startup_briefing(core_setup):
+    """Verify executive startup briefing queries tools and sends prompt once."""
+    core, logistics, audio, vision = core_setup
+    mock_session = AsyncMock()
+    mock_session.send = AsyncMock()
+
+    # Pre-populate a briefing note
+    logistics.manage_executive_briefing(action="add", task_item="Audit Phase 8 Ergonomics.")
+
+    assert core._initial_briefing_sent is False
+    success = await core.send_startup_briefing(mock_session)
+    assert success is True
+    assert core._initial_briefing_sent is True
+    assert mock_session.send.await_count == 1
+
+    call_kwargs = mock_session.send.call_args.kwargs
+    assert "Audit Phase 8 Ergonomics" in call_kwargs["input"]
+    assert "System Diagnostics" in call_kwargs["input"]
+    assert call_kwargs["end_of_turn"] is True
+
+    # Idempotent call: second attempt returns False and doesn't call send again
+    second_try = await core.send_startup_briefing(mock_session)
+    assert second_try is False
+    assert mock_session.send.await_count == 1
+

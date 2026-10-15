@@ -4,11 +4,21 @@ const electronBridge = {
   setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => {
     ipcRenderer.send("set-ignore-mouse-events", ignore, options);
   },
+  setContentProtection: (enable: boolean) => {
+    ipcRenderer.send("set-content-protection", enable);
+  },
   onPttTriggered: (callback: () => void) => {
     const handler = () => callback();
     ipcRenderer.on("ptt-triggered", handler);
     return () => {
       ipcRenderer.removeListener("ptt-triggered", handler);
+    };
+  },
+  onToggleLayoutMode: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("toggle-layout-mode", handler);
+    return () => {
+      ipcRenderer.removeListener("toggle-layout-mode", handler);
     };
   },
 };

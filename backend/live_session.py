@@ -64,6 +64,7 @@ class AlfredLiveCore:
         self.is_running: bool = False
         self._loop_active: bool = False
         self._session: Any = None
+        self._initial_briefing_sent: bool = False
 
     def update_transcript(self, text: str) -> None:
         """Notifies coordinator and connected HUD clients with status or transcript update."""
@@ -226,6 +227,40 @@ class AlfredLiveCore:
                 logger.error("Error in Live API receive stream: %s", e)
                 await asyncio.sleep(0.2)
 
+    async def send_startup_briefing(self, session: Any) -> bool:
+        """Queries diagnostics & briefing notes and triggers initial executive greeting turn."""
+        if self._initial_briefing_sent:
+            return False
+
+        try:
+            diag = ""
+            briefing = ""
+            if "get_system_diagnostics" in self.tool_map:
+                fn = self.tool_map["get_system_diagnostics"]
+                diag = await fn() if inspect.iscoroutinefunction(fn) else await asyncio.to_thread(fn)
+            if "manage_executive_briefing" in self.tool_map:
+                fn = self.tool_map["manage_executive_briefing"]
+                briefing = (
+                    await fn(action="list")
+                    if inspect.iscoroutinefunction(fn)
+                    else await asyncio.to_thread(fn, action="list")
+                )
+
+            prompt = (
+                f"[SYSTEM EVENT: The Director has logged into the executive console. "
+                f"System Diagnostics: {diag}. "
+                f"Executive Briefing Notes: {briefing}. "
+                f"Greet the Director with an articulate, composed, and concise 2-sentence executive status and agenda briefing.]"
+            )
+            logger.info("[ALFRED CORE] Triggering Executive Startup Briefing turn...")
+            self.set_status("thinking")
+            await session.send(input=prompt, end_of_turn=True)
+            self._initial_briefing_sent = True
+            return True
+        except Exception as e:
+            logger.warning("[ALFRED CORE] Failed to dispatch startup briefing: %s", e)
+            return False
+
     async def start(self) -> None:
         """Starts the Gemini Multimodal Live API bidirectional session."""
         if self.is_running:
@@ -266,6 +301,9 @@ class AlfredLiveCore:
                 connected_msg = f"[LIVE API]: Connected to {self.model_id} (Voice: {self.voice_name}). Standing by, Sir."
                 logger.info(connected_msg)
                 self.update_transcript(connected_msg)
+
+                # Trigger initial Executive Startup Briefing upon connection
+                await self.send_startup_briefing(session)
 
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(self._stream_mic_to_alfred(session))

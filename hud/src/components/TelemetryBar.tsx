@@ -1,5 +1,17 @@
-import type { AlfredStatus, AudioDevice } from "../types";
-import { Cpu, HardDrive, Terminal, Eye, Disc, Mic, MicOff, MousePointerClick } from "lucide-react";
+import type { AlfredStatus, AudioDevice, LayoutMode } from "../types";
+import {
+  Cpu,
+  HardDrive,
+  Terminal,
+  Eye,
+  EyeOff,
+  Disc,
+  Mic,
+  MicOff,
+  MousePointerClick,
+  Monitor,
+  LayoutGrid,
+} from "lucide-react";
 
 interface TelemetryBarProps {
   status: AlfredStatus;
@@ -13,8 +25,12 @@ interface TelemetryBarProps {
   connected: boolean;
   micActive: boolean;
   clickThroughLocked?: boolean;
+  layoutMode?: LayoutMode;
+  stealthEnabled?: boolean;
   onToggleMic: () => void;
   onToggleClickThrough?: () => void;
+  onToggleLayout?: () => void;
+  onToggleStealth?: () => void;
   onInspectScreen?: () => void;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
@@ -66,8 +82,12 @@ export function TelemetryBar({
   connected,
   micActive,
   clickThroughLocked = false,
+  layoutMode = "cinema",
+  stealthEnabled = true,
   onToggleMic,
   onToggleClickThrough,
+  onToggleLayout,
+  onToggleStealth,
   onInspectScreen,
   onMouseEnter,
   onMouseLeave,
@@ -198,6 +218,54 @@ export function TelemetryBar({
           >
             <MousePointerClick className={`w-3 h-3 ${clickThroughLocked ? "text-amber-400" : "text-slate-400"}`} />
             <span>CLICK-THROUGH: {clickThroughLocked ? "OFF" : "ON"}</span>
+          </button>
+        )}
+
+        {/* Layout Mode (Cinema vs Docked) Toggle */}
+        {onToggleLayout && (
+          <button
+            onClick={onToggleLayout}
+            title={
+              layoutMode === "cinema"
+                ? "Cinema Mode (AudioOrb centered). Click or press Ctrl+Shift+A to dock into corner."
+                : "Docked Mode (Center clear for coding). Click or press Ctrl+Shift+A for Cinema Mode."
+            }
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl font-mono text-[10px] font-bold transition-all duration-200 cursor-pointer border ${
+              layoutMode === "docked"
+                ? "bg-cyan-500/20 border-cyan-400/60 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+                : "bg-slate-900/80 border-slate-700/60 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/40"
+            }`}
+          >
+            {layoutMode === "docked" ? (
+              <LayoutGrid className="w-3 h-3 text-cyan-400" />
+            ) : (
+              <Monitor className="w-3 h-3 text-slate-400" />
+            )}
+            <span>LAYOUT: {layoutMode.toUpperCase()}</span>
+          </button>
+        )}
+
+        {/* Stealth Screen Inspection (setContentProtection) Toggle */}
+        {onToggleStealth && (
+          <button
+            onClick={onToggleStealth}
+            title={
+              stealthEnabled
+                ? "Stealth Capture ON (HUD invisible to screen capture & Vision Cortex). Click to show HUD in screen captures."
+                : "Stealth Capture OFF (HUD visible in screen captures). Click to hide HUD from screen captures."
+            }
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl font-mono text-[10px] font-bold transition-all duration-200 cursor-pointer border ${
+              stealthEnabled
+                ? "bg-cyan-500/20 border-cyan-400/60 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+                : "bg-slate-900/80 border-slate-700/60 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/40"
+            }`}
+          >
+            {stealthEnabled ? (
+              <EyeOff className="w-3 h-3 text-cyan-400" />
+            ) : (
+              <Eye className="w-3 h-3 text-slate-400" />
+            )}
+            <span>STEALTH: {stealthEnabled ? "ON" : "OFF"}</span>
           </button>
         )}
       </div>

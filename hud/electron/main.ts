@@ -1,7 +1,9 @@
-import { app, BrowserWindow, ipcMain, globalShortcut, screen } from "electron";
+import { app, BrowserWindow, ipcMain, globalShortcut, screen, Tray, Menu, nativeImage } from "electron";
 import * as path from "path";
+import * as fs from "fs";
 
 let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
 
 function createWindow() {
   const primaryDisplay = screen.getPrimaryDisplay();
@@ -27,6 +29,9 @@ function createWindow() {
   // Default to pass-through mouse events so user can interact with their desktop behind the HUD
   mainWindow.setIgnoreMouseEvents(true, { forward: true });
 
+  // Stealth Screen Inspection: Prevent HUD window from being captured by mss/screen recording
+  mainWindow.setContentProtection(true);
+
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
     mainWindow.loadURL(devServerUrl);
@@ -36,6 +41,69 @@ function createWindow() {
 
   mainWindow.on("closed", () => {
     mainWindow = null;
+  });
+}
+
+function createTray() {
+  if (tray) return;
+
+  // Resolve tray icon (favor generated 32x32 PNG, fallback to SVG)
+  const pngPath = path.join(__dirname, "../public/tray-icon.png");
+  const svgPath = path.join(__dirname, "../public/favicon.svg");
+  const iconPath = fs.existsSync(pngPath) ? pngPath : svgPath;
+
+  const trayIcon = nativeImage.createFromPath(iconPath);
+  tray = new Tray(trayIcon);
+  tray.setToolTip("A.L.F.R.E.D. Executive Core");
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: "Show / Hide HUD",
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isVisible()) {
+            mainWindow.hide();
+          } else {
+            mainWindow.show();
+          }
+        }
+      },
+    },
+    {
+      label: "Toggle Cinema / Dock Mode (Ctrl+Shift+A)",
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("toggle-layout-mode");
+        }
+      },
+    },
+    {
+      label: "Mute / Unmute Mic (Ctrl+Space)",
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("ptt-triggered");
+        }
+      },
+    },
+    { type: "separator" },
+    {
+      label: "Shutdown A.L.F.R.E.D.",
+      click: () => {
+        app.quit();
+      },
+    },
+  ]);
+
+  tray.setContextMenu(contextMenu);
+
+  tray.on("click", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isVisible()) {
+        mainWindow.hide();
+      } else {
+        mainWindow.show();
+      }
+    }
   });
 }
 
@@ -50,19 +118,30 @@ ipcMain.on("set-ignore-mouse-events", (_event, ignore: boolean, options?: { forw
   }
 });
 
+// IPC Handler for Stealth Capture (Content Protection)
+ipcMain.on("set-content-protection", (_event, enable: boolean) => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setContentProtection(enable);
+  }
+});
+
 app.whenReady().then(() => {
   createWindow();
+  createTray();
 
   // Register Global Push-to-Talk Shortcut (Ctrl+Space on Windows/Linux, Cmd+Space on macOS)
-  const registered = globalShortcut.register("CommandOrControl+Space", () => {
+  globalShortcut.register("CommandOrControl+Space", () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("ptt-triggered");
     }
   });
 
-  if (!registered) {
-    console.warn("Global shortcut registration failed for CommandOrControl+Space");
-  }
+  // Register Global Layout Mode Shortcut (Ctrl+Shift+A on Windows/Linux, Cmd+Shift+A on macOS)
+  globalShortcut.register("CommandOrControl+Shift+A", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("toggle-layout-mode");
+    }
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -73,6 +152,10 @@ app.whenReady().then(() => {
 
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
+  if (tray) {
+    tray.destroy();
+    tray = null;
+  }
 });
 
 app.on("window-all-closed", () => {
