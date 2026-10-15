@@ -74,6 +74,8 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
     };
   }, [connect]);
 
+  const [micActive, setMicActive] = useState<boolean>(false);
+
   const sendApproval = useCallback((id: string, approved: boolean) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "approval_response", id, approved }));
@@ -83,9 +85,46 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
   }, []);
 
   const sendPtt = useCallback((down: boolean) => {
+    setMicActive(down);
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "ptt_event", state: down ? "down" : "up" }));
     }
+  }, []);
+
+  const toggleMic = useCallback(() => {
+    setMicActive((prev) => {
+      const next = !prev;
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "ptt_event", state: next ? "down" : "up" }));
+      }
+      return next;
+    });
+  }, []);
+
+  const sendTextPrompt = useCallback((text: string) => {
+    if (!text.trim()) return;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "text_prompt", text: text.trim() }));
+    }
+    // Optimistically append directive to transcript for immediate feedback
+    setState((prev) => ({
+      ...prev,
+      transcript: `${prev.transcript}\n› Directive: ${text.trim()}`,
+      status: prev.status === "idle" ? "thinking" : prev.status,
+    }));
+  }, []);
+
+  const pulseRms = useCallback((intensity = 0.85) => {
+    setState((prev) => ({ ...prev, rms_volume: intensity }));
+    let decayVal = intensity;
+    const interval = setInterval(() => {
+      decayVal *= 0.7;
+      if (decayVal < 0.02) {
+        decayVal = 0.0;
+        clearInterval(interval);
+      }
+      setState((prev) => ({ ...prev, rms_volume: Number(decayVal.toFixed(3)) }));
+    }, 40);
   }, []);
 
   const sendInspectScreen = useCallback(() => {
@@ -102,8 +141,12 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
   return {
     state,
     connected,
+    micActive,
+    toggleMic,
     sendApproval,
     sendPtt,
+    sendTextPrompt,
+    pulseRms,
     sendInspectScreen,
     injectMockState,
   };

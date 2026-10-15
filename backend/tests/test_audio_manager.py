@@ -58,3 +58,24 @@ def test_acoustic_gate_logic():
     # 4. Push-to-Talk active -> always allowed regardless of speaker status
     mgr.set_push_to_talk(True)
     assert mgr.should_stream_mic(rms=0.01) is True
+
+
+@pytest.mark.asyncio
+async def test_input_callback_thread_safety():
+    """Verify sounddevice PortAudio thread callback dispatches safely via call_soon_threadsafe."""
+    import asyncio
+    mgr = AudioManager()
+    mgr.is_running = True
+    mgr._loop = asyncio.get_running_loop()
+
+    # Simulate raw PCM buffer from PortAudio thread
+    raw_chunk = b"\x20\x00" * 256
+    mgr._input_callback(raw_chunk, 256, None, None)
+
+    # Let event loop process threadsafe dispatch
+    await asyncio.sleep(0.01)
+
+    assert not mgr.mic_queue.empty()
+    queued = mgr.mic_queue.get_nowait()
+    assert queued == raw_chunk
+    assert mgr.current_mic_rms > 0.0

@@ -71,3 +71,16 @@ async def test_hud_ptt_event_handling():
     # PTT Up
     await hub.handle_hud_message({"type": "ptt_event", "state": "up"})
     mock_audio.set_push_to_talk.assert_called_with(False)
+
+    # PTT Toggle
+    mock_audio.ptt_active = False
+    await hub.handle_hud_message({"type": "ptt_event", "state": "toggle"})
+    mock_audio.set_push_to_talk.assert_called_with(True)
+
+
+@pytest.mark.asyncio
+async def test_hud_text_prompt_handling():
+    """Verify HUD text prompts update coordinator transcript or stream to Live session."""
+    hub = AlfredHubCoordinator(port=8765)
+    await hub.handle_hud_message({"type": "text_prompt", "text": "Execute contingency protocol beta"})
+    assert "contingency protocol beta" in hub.current_transcript

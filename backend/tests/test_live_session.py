@@ -135,3 +135,21 @@ async def test_barge_in_interruption_flushing(core_setup):
     assert audio.speaker_queue.empty()
     assert audio.is_playing is False
     assert core.status == "listening"
+
+
+@pytest.mark.asyncio
+async def test_run_executive_loop_lifecycle(core_setup):
+    """Verify run_executive_loop starts and stops cleanly."""
+    core, logistics, audio, vision = core_setup
+
+    async def mock_start():
+        await asyncio.sleep(0.02)
+
+    core.start = mock_start
+    task = asyncio.create_task(core.run_executive_loop())
+    await asyncio.sleep(0.01)
+    assert core._loop_active is True
+
+    await core.stop()
+    await task
+    assert core._loop_active is False

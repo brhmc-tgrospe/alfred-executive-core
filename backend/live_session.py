@@ -62,6 +62,7 @@ class AlfredLiveCore:
         self.status: str = "idle"  # "idle" | "listening" | "thinking" | "speaking"
         self.active_tool: Optional[str] = None
         self.is_running: bool = False
+        self._loop_active: bool = False
         self._session: Any = None
 
     def set_status(self, new_status: str) -> None:
@@ -247,8 +248,25 @@ class AlfredLiveCore:
             self.is_running = False
             self.set_status("idle")
 
+    async def run_executive_loop(self) -> None:
+        """Continuously runs the Gemini Multimodal Live API executive session with graceful reconnection."""
+        self._loop_active = True
+        logger.info("[ALFRED CORE] Launching executive live multimodal session loop...")
+        while self._loop_active:
+            try:
+                await self.start()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("[ALFRED CORE] Live session error in executive loop: %s", e)
+
+            if not self._loop_active:
+                break
+            await asyncio.sleep(2.0)
+
     async def stop(self) -> None:
         """Gracefully disconnects the session and halts audio streams."""
+        self._loop_active = False
         self.is_running = False
         await self.audio_manager.stop()
         self.set_status("idle")

@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useAlfredWs } from "./hooks/useAlfredWs";
 import { AudioOrb } from "./components/AudioOrb";
 import { TelemetryBar } from "./components/TelemetryBar";
@@ -11,14 +11,37 @@ export function App() {
   const {
     state,
     connected,
+    micActive,
+    toggleMic,
     sendApproval,
     sendInspectScreen,
+    sendTextPrompt,
+    pulseRms,
     injectMockState,
   } = useAlfredWs();
 
   // Show simulation controls when running in web browser without Electron
   const isElectron = typeof window !== "undefined" && Boolean(window.electronAPI);
   const [showSimControls, setShowSimControls] = useState<boolean>(!isElectron);
+
+  // Toggle-to-Talk via Electron IPC or browser Ctrl+Space
+  useEffect(() => {
+    if (window.electronAPI?.onPttTriggered) {
+      const unsubscribe = window.electronAPI.onPttTriggered(() => {
+        toggleMic();
+      });
+      return unsubscribe;
+    }
+
+    const handleKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.ctrlKey && e.code === "Space") {
+        e.preventDefault();
+        toggleMic();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [toggleMic]);
 
   // Mouse event IPC forwarder for Electron transparent overlay
   const handlePanelMouseEnter = useCallback(() => {
@@ -61,7 +84,7 @@ export function App() {
 
   return (
     <main className="w-screen h-screen relative flex flex-col justify-between p-6 overflow-hidden pointer-events-none select-none bg-transparent">
-      {/* 1. Top Telemetry Bar */}
+      {/* 1. Top Telemetry Bar with Toggle-to-Talk */}
       <div className="w-full flex justify-center pointer-events-auto">
         <TelemetryBar
           status={state.status}
@@ -69,6 +92,8 @@ export function App() {
           ram={state.ram}
           activeTool={state.active_tool}
           connected={connected}
+          micActive={micActive}
+          onToggleMic={toggleMic}
           onInspectScreen={sendInspectScreen}
           onMouseEnter={handlePanelMouseEnter}
           onMouseLeave={handlePanelMouseLeave}
@@ -103,11 +128,13 @@ export function App() {
         </div>
       </div>
 
-      {/* 3. Bottom Scrolling Transcript Drawer */}
+      {/* 3. Bottom Scrolling Transcript Drawer with Simulation Toolbar */}
       <div className="w-full flex justify-center pointer-events-auto">
         <TranscriptDrawer
           transcript={state.transcript}
           status={state.status}
+          onSendTextPrompt={sendTextPrompt}
+          onPulseRms={pulseRms}
           onMouseEnter={handlePanelMouseEnter}
           onMouseLeave={handlePanelMouseLeave}
         />

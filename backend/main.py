@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from typing import Optional, Set
 from dotenv import load_dotenv
@@ -34,7 +35,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manages coordinator lifecycle on server startup and shutdown."""
-    await hub.start(start_live_session=bool(os.environ.get("GEMINI_API_KEY")))
+    is_testing = "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
+    if not is_testing:
+        # Explicitly invoke audio_manager.start() for physical microphone
+        await hub.audio_manager.start()
+        # Spawn live_session.run_executive_loop() if API key is present
+        if os.environ.get("GEMINI_API_KEY"):
+            hub._live_task = asyncio.create_task(hub.live_session.run_executive_loop())
+
+    await hub.start(start_live_session=False if is_testing else bool(os.environ.get("GEMINI_API_KEY")))
     yield
     await hub.stop()
 
@@ -95,6 +104,10 @@ class AlfredHubCoordinator:
             on_active_tool_change=self.on_active_tool_change,
             on_transcript=self.on_transcript_update,
         )
+
+        # Direct aliases for clear architectural access
+        self.audio_manager = self.audio
+        self.live_session = self.live_core
 
         # Background task references
         self._metrics_task: Optional[asyncio.Task] = None
@@ -190,9 +203,23 @@ class AlfredHubCoordinator:
 
         elif msg_type == "ptt_event":
             state = message_data.get("state")
-            pressed = (state == "down") or message_data.get("pressed", False)
+            if state == "toggle":
+                pressed = not self.audio.ptt_active
+            else:
+                pressed = (state == "down") or message_data.get("pressed", False)
             self.audio.set_push_to_talk(pressed)
-            logger.debug("Push-to-Talk set: %s", pressed)
+            logger.debug("Push-to-Talk set: %s (state: %s)", pressed, state)
+            await self.broadcast_state_packet()
+
+        elif msg_type == "text_prompt":
+            text = message_data.get("text", "")
+            if text and self.live_core._session:
+                logger.info("Injecting text prompt from HUD: %s", text)
+                await self.live_core._session.send(input=text, end_of_turn=True)
+            elif text:
+                logger.info("Received text prompt (no active Live session): %s", text)
+                self.current_transcript = f"Directive received: {text}"
+                await self.broadcast_state_packet()
 
         elif msg_type == "inspect_screen_trigger":
             logger.info("Manual inspect screen triggered from HUD.")
@@ -212,8 +239,8 @@ class AlfredHubCoordinator:
         self._metrics_task = asyncio.create_task(self._metrics_polling_loop())
         self._broadcast_task = asyncio.create_task(self._broadcast_loop())
 
-        if start_live_session and os.environ.get("GEMINI_API_KEY"):
-            self._live_task = asyncio.create_task(self.live_core.start())
+        if start_live_session and os.environ.get("GEMINI_API_KEY") and not self._live_task:
+            self._live_task = asyncio.create_task(self.live_session.run_executive_loop())
 
         logger.info("[A.L.F.R.E.D. HUB] Coordinator started on port %s", self.port)
 

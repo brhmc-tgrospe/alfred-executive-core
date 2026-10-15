@@ -110,16 +110,24 @@ class AudioManager:
         return True
 
     def _input_callback(self, indata, frames, time_info, status):
-        """Callback executed in sounddevice audio thread for incoming mic data."""
-        if not self.is_running or self._loop is None:
+        """Callback executed in sounddevice PortAudio audio thread for incoming mic data.
+
+        Safely dispatches raw PCM buffers to asyncio.Queue using loop.call_soon_threadsafe
+        so the async consumer loop wakes up immediately without thread contention.
+        """
+        if not self.is_running or self._loop is None or self._loop.is_closed():
             return
 
-        pcm_bytes = indata.tobytes()
-        rms = calculate_rms(pcm_bytes)
-        self.current_mic_rms = rms
+        try:
+            pcm_bytes = indata.tobytes() if hasattr(indata, "tobytes") else bytes(indata)
+            rms = calculate_rms(pcm_bytes)
+            self.current_mic_rms = rms
 
-        if self.should_stream_mic(rms):
-            self._loop.call_soon_threadsafe(self.mic_queue.put_nowait, pcm_bytes)
+            if self.should_stream_mic(rms):
+                self._loop.call_soon_threadsafe(self.mic_queue.put_nowait, pcm_bytes)
+        except Exception:
+            # Shield PortAudio audio thread from uncaught Python exceptions
+            pass
 
     def _output_callback(self, outdata, frames, time_info, status):
         """Callback for sounddevice output stream."""

@@ -1,5 +1,5 @@
 import type { AlfredStatus } from "../types";
-import { Cpu, HardDrive, Terminal, Radio, Eye, Disc } from "lucide-react";
+import { Cpu, HardDrive, Terminal, Eye, Disc, Mic, MicOff } from "lucide-react";
 
 interface TelemetryBarProps {
   status: AlfredStatus;
@@ -7,6 +7,8 @@ interface TelemetryBarProps {
   ram: number;
   activeTool: string | null;
   connected: boolean;
+  micActive: boolean;
+  onToggleMic: () => void;
   onInspectScreen?: () => void;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
@@ -52,6 +54,8 @@ export function TelemetryBar({
   ram,
   activeTool,
   connected,
+  micActive,
+  onToggleMic,
   onInspectScreen,
   onMouseEnter,
   onMouseLeave,
@@ -90,19 +94,41 @@ export function TelemetryBar({
         </div>
       </div>
 
-      {/* Middle: Active Tool Ticker */}
-      <div className="flex-1 flex items-center justify-center min-w-0 px-2">
-        {activeTool ? (
+      {/* Middle: Active Tool Ticker & Toggle-to-Talk Switch */}
+      <div className="flex-1 flex items-center justify-center min-w-0 px-2 gap-3">
+        {activeTool && (
           <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 font-mono text-[11px] animate-pulse truncate max-w-xs">
             <Terminal className="w-3.5 h-3.5 shrink-0 text-amber-400" />
             <span className="truncate">TOOL: {activeTool}</span>
           </div>
-        ) : (
-          <div className="flex items-center gap-2 text-slate-400 font-mono text-[11px]">
-            <Radio className="w-3.5 h-3.5 text-cyan-500/70" />
-            <span className="tracking-wide">HOLD [CTRL+SPACE] FOR PTT</span>
-          </div>
         )}
+
+        {/* Toggle-to-Talk Switch */}
+        <button
+          onClick={onToggleMic}
+          title={micActive ? "Mic Live (Click or Ctrl+Space to Mute)" : "Mic Muted (Click or Ctrl+Space to Talk)"}
+          className={`flex items-center gap-2 px-3 py-1.5 rounded-xl font-mono text-[11px] font-bold transition-all duration-200 cursor-pointer border ${
+            micActive
+              ? "bg-emerald-500/20 border-emerald-400/60 text-emerald-300 shadow-[0_0_15px_rgba(16,185,129,0.35)]"
+              : "bg-slate-900/80 border-slate-700/60 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/40"
+          }`}
+        >
+          {micActive ? (
+            <>
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <Mic className="w-3.5 h-3.5 text-emerald-400" />
+              <span>MIC LIVE [CTRL+SPACE]</span>
+            </>
+          ) : (
+            <>
+              <MicOff className="w-3.5 h-3.5 text-slate-500" />
+              <span>MIC MUTED [CTRL+SPACE]</span>
+            </>
+          )}
+        </button>
       </div>
 
       {/* Right Side: System Telemetry & Screen Inspect */}
