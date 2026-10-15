@@ -1,22 +1,28 @@
 """A.L.F.R.E.D. Audio Manager.
 
-Handles 16kHz mono PCM microphone capture and 24kHz PCM speaker playback
-using non-blocking asyncio queues, sounddevice streams, RMS amplitude calculations,
-and acoustic feedback gating.
+Handles:
+- 16kHz mono PCM microphone capture with digital pre-amp gain (*2.5) and dynamic device switching.
+- 24kHz PCM speaker playback using a thread-safe continuous bytearray FIFO stream buffer
+  with 120ms jitter pre-buffering (~5,760 bytes) and zero-underflow sounddevice.RawOutputStream.
+- Acoustic gating and instantaneous barge-in interruption.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import struct
-from typing import Optional, Callable
+import threading
+from typing import Optional, List, Dict, Any
 import numpy as np
 
 try:
     import sounddevice as sd
 except ImportError:
     sd = None  # Handled gracefully in mock / non-device environments
+
+logger = logging.getLogger("AlfredAudio")
 
 
 def calculate_rms(pcm_data: bytes) -> float:
@@ -27,7 +33,6 @@ def calculate_rms(pcm_data: bytes) -> float:
     if not pcm_data:
         return 0.0
 
-    # Ensure even number of bytes for 16-bit samples
     num_samples = len(pcm_data) // 2
     if num_samples == 0:
         return 0.0
@@ -35,7 +40,6 @@ def calculate_rms(pcm_data: bytes) -> float:
     try:
         # Unpack 16-bit signed integers (little-endian)
         samples = struct.unpack(f"<{num_samples}h", pcm_data[: num_samples * 2])
-        # Calculate mean square
         sum_squares = sum(s * s for s in samples)
         mean_square = sum_squares / num_samples
         rms = math.sqrt(mean_square)
@@ -47,7 +51,11 @@ def calculate_rms(pcm_data: bytes) -> float:
 
 
 class AudioManager:
-    """Manages asynchronous bidirectional audio streams and acoustic gating."""
+    """Manages asynchronous bidirectional audio streams, continuous FIFO buffering, and acoustic gating."""
+
+    current_device_id: Optional[int] = None
+    input_gain: float = 2.5
+    ptt_active: bool = True
 
     def __init__(
         self,
@@ -55,34 +63,85 @@ class AudioManager:
         output_sample_rate: int = 24000,
         channels: int = 1,
         barge_in_rms_threshold: float = 0.18,
+        input_gain: float = 2.5,
     ) -> None:
         self.input_sample_rate = input_sample_rate
         self.output_sample_rate = output_sample_rate
         self.channels = channels
         self.barge_in_threshold = barge_in_rms_threshold
+        self.input_gain = input_gain
 
         # Asynchronous queues
         self.mic_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self.speaker_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
-        # State flags
-        self.is_running = False
-        self.is_playing = False
-        self.ptt_active = False
-        self.current_mic_rms = 0.0
+        # Continuous thread-safe playback FIFO stream buffer
+        self._playback_buffer: bytearray = bytearray()
+        self._playback_lock: threading.Lock = threading.Lock()
+
+        # 120ms Jitter Pre-Buffer (at 24kHz 16-bit mono: 0.12s * 24000 samples/s * 2 bytes/sample = 5760 bytes)
+        self.jitter_prebuffer_bytes: int = int(0.12 * self.output_sample_rate * 2 * self.channels)
+        self._prebuffering: bool = True
+        self._turn_complete: bool = False
+        self.underflow_count: int = 0
+
+        # State flags: default to live listening (ptt_active = True)
+        self.is_running: bool = False
+        self.is_playing: bool = False
+        self.ptt_active: bool = True
+        self.current_mic_rms: float = 0.0
+        self.current_device_id: Optional[int] = None
 
         # Sounddevice streams
-        self._input_stream: Optional[sd.InputStream] = None
-        self._output_stream: Optional[sd.OutputStream] = None
+        self._input_stream: Optional[Any] = None
+        self._output_stream: Optional[Any] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._playback_task: Optional[asyncio.Task] = None
+        self._feeder_task: Optional[asyncio.Task] = None
 
     def set_push_to_talk(self, active: bool) -> None:
-        """Sets the manual Push-to-Talk state."""
+        """Sets the manual Push-to-Talk / Live Listening state."""
         self.ptt_active = active
 
-    def clear_playback(self) -> None:
-        """Immediately flushes the speaker playback queue for barge-in interruption."""
+    def feed_speaker_audio(self, chunk: bytes) -> None:
+        """Feeds an incoming 24kHz 16-bit PCM chunk into the continuous thread-safe FIFO buffer."""
+        if not chunk:
+            return
+        with self._playback_lock:
+            was_empty = (len(self._playback_buffer) == 0)
+            self._playback_buffer.extend(chunk)
+            if was_empty:
+                self._prebuffering = True
+                self._turn_complete = False
+
+    def mark_turn_complete(self) -> None:
+        """Signals that Gemini has finished transmitting chunks for the current turn.
+
+        Allows any remaining audio tail under the 120ms prebuffer threshold to play out completely.
+        """
+        with self._playback_lock:
+            self._turn_complete = True
+            if len(self._playback_buffer) > 0:
+                self._prebuffering = False
+
+    def is_playback_active(self) -> bool:
+        """Returns True if audio is actively playing or queued in the playback FIFO buffer."""
+        with self._playback_lock:
+            return len(self._playback_buffer) > 0 or self.is_playing
+
+    async def wait_for_playback_drain(self, timeout: float = 12.0) -> None:
+        """Waits asynchronously until the playback bytearray buffer drains completely to 0 bytes."""
+        start_time = asyncio.get_event_loop().time()
+        # Give initial buffer a moment to begin playback
+        await asyncio.sleep(0.06)
+        while self.is_playback_active():
+            if (asyncio.get_event_loop().time() - start_time) > timeout:
+                break
+            await asyncio.sleep(0.04)
+        # Small latency settling window
+        await asyncio.sleep(0.06)
+
+    def clear_playback(self) -> int:
+        """Immediately flushes the speaker playback buffer and queue for barge-in interruption."""
         cleared_count = 0
         while not self.speaker_queue.empty():
             try:
@@ -90,7 +149,15 @@ class AudioManager:
                 cleared_count += 1
             except asyncio.QueueEmpty:
                 break
-        self.is_playing = False
+
+        with self._playback_lock:
+            if len(self._playback_buffer) > 0:
+                cleared_count += 1
+            self._playback_buffer.clear()
+            self._prebuffering = True
+            self._turn_complete = False
+            self.is_playing = False
+
         return cleared_count
 
     def should_stream_mic(self, rms: float) -> bool:
@@ -98,41 +165,140 @@ class AudioManager:
 
         Applies acoustic gating to prevent ALFRED from interrupting himself.
         """
-        # If user explicitly pressed Push-to-Talk, always stream
+        # If user explicitly pressed Push-to-Talk / Live Listening, always stream
         if self.ptt_active:
             return True
 
         # If ALFRED is speaking (output active), only stream if user exceeds barge-in threshold
-        if self.is_playing:
+        if self.is_playing or self.is_playback_active():
             return rms >= self.barge_in_threshold
 
-        # Otherwise, user is speaking in quiet room, allow stream
         return True
 
     def _input_callback(self, indata, frames, time_info, status):
-        """Callback executed in sounddevice PortAudio audio thread for incoming mic data.
-
-        Safely dispatches raw PCM buffers to asyncio.Queue using loop.call_soon_threadsafe
-        so the async consumer loop wakes up immediately without thread contention.
-        """
+        """Callback executed in sounddevice PortAudio audio thread for incoming mic data."""
         if not self.is_running or self._loop is None or self._loop.is_closed():
             return
 
         try:
-            pcm_bytes = indata.tobytes() if hasattr(indata, "tobytes") else bytes(indata)
+            raw_bytes = indata.tobytes() if hasattr(indata, "tobytes") else bytes(indata)
+
+            # Apply digital pre-amp gain (*2.5 clipped to int16 range)
+            if self.input_gain != 1.0:
+                samples = np.frombuffer(raw_bytes, dtype=np.int16)
+                amplified = np.clip(samples.astype(np.float32) * self.input_gain, -32768, 32767).astype(np.int16)
+                pcm_bytes = amplified.tobytes()
+            else:
+                pcm_bytes = raw_bytes
+
             rms = calculate_rms(pcm_bytes)
-            self.current_mic_rms = rms
+            # Scaled RMS curve (x2.0) for responsive HUD visualizer display (0.10 to 0.80 range)
+            self.current_mic_rms = min(1.0, float(round(rms * 2.0, 4)))
 
             if self.should_stream_mic(rms):
                 self._loop.call_soon_threadsafe(self.mic_queue.put_nowait, pcm_bytes)
         except Exception:
-            # Shield PortAudio audio thread from uncaught Python exceptions
             pass
 
     def _output_callback(self, outdata, frames, time_info, status):
-        """Callback for sounddevice output stream."""
-        # Non-blocking pull handled via asyncio worker task feeding speaker
-        pass
+        """Continuous stream callback for sounddevice RawOutputStream.
+
+        Slices exact byte blocks from the continuous bytearray FIFO buffer.
+        Guarantees jitter-free playback with 120ms prebuffering and zero-padding on drain.
+        """
+        needed = len(outdata)
+        if status and getattr(status, "output_underflow", False):
+            self.underflow_count += 1
+
+        with self._playback_lock:
+            # 1. Jitter Pre-buffering: wait until 120ms of audio has arrived before starting
+            if self._prebuffering:
+                if len(self._playback_buffer) >= self.jitter_prebuffer_bytes or self._turn_complete:
+                    self._prebuffering = False
+                    self.is_playing = True
+                else:
+                    outdata[:] = b"\x00" * needed
+                    return
+
+            buf_len = len(self._playback_buffer)
+            # 2. Buffer exhausted: output silence, reset prebuffering
+            if buf_len == 0:
+                outdata[:] = b"\x00" * needed
+                self._prebuffering = True
+                self.is_playing = False
+                return
+
+            self.is_playing = True
+            # 3. Continuous FIFO Slicing
+            if buf_len >= needed:
+                outdata[:] = self._playback_buffer[:needed]
+                del self._playback_buffer[:needed]
+            else:
+                # Partial block remaining at end of turn
+                outdata[:buf_len] = self._playback_buffer[:buf_len]
+                outdata[buf_len:] = b"\x00" * (needed - buf_len)
+                self._playback_buffer.clear()
+                self._prebuffering = True
+                self.is_playing = False
+
+    def list_input_devices(self) -> List[Dict[str, Any]]:
+        """Lists available sounddevice audio input devices."""
+        if sd is None:
+            return []
+        devices = []
+        try:
+            default_in = sd.default.device[0] if hasattr(sd.default, "device") else -1
+            for idx, dev in enumerate(sd.query_devices()):
+                if dev.get("max_input_channels", 0) > 0:
+                    devices.append({
+                        "id": idx,
+                        "name": str(dev.get("name", f"Microphone {idx}")).strip(),
+                        "channels": dev.get("max_input_channels", 1),
+                        "is_default": (idx == default_in),
+                    })
+        except Exception as e:
+            logger.warning("Failed to query audio input devices: %s", e)
+        return devices
+
+    def switch_input_device(self, device_id: int | str) -> bool:
+        """Hot-swaps the physical microphone input device live without stopping playback or other services."""
+        if sd is None:
+            return False
+        try:
+            dev_idx = int(device_id)
+            self.current_device_id = dev_idx
+
+            if self.is_running and self._input_stream is not None:
+                self._input_stream.stop()
+                self._input_stream.close()
+                self._input_stream = None
+
+                self._input_stream = sd.InputStream(
+                    device=dev_idx,
+                    samplerate=self.input_sample_rate,
+                    channels=self.channels,
+                    dtype="int16",
+                    callback=self._input_callback,
+                    blocksize=512,
+                )
+                self._input_stream.start()
+                logger.info("[AudioManager] Successfully switched mic device to ID %s", dev_idx)
+            return True
+        except Exception as e:
+            logger.error("[AudioManager] Failed to switch mic input device to %s: %s", device_id, e)
+            return False
+
+    async def _queue_feeder_worker(self) -> None:
+        """Consumes any chunks placed in speaker_queue and forwards them to the continuous FIFO buffer."""
+        while self.is_running:
+            try:
+                chunk = await self.speaker_queue.get()
+                if chunk:
+                    self.feed_speaker_audio(chunk)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(0.01)
 
     async def start(self) -> None:
         """Starts the audio hardware streams and playback worker."""
@@ -144,63 +310,68 @@ class AudioManager:
 
         if sd is not None:
             try:
-                self._input_stream = sd.InputStream(
-                    samplerate=self.input_sample_rate,
-                    channels=self.channels,
-                    dtype="int16",
-                    callback=self._input_callback,
-                    blocksize=512,
-                )
+                # 1. Microphone Input Stream
+                stream_kwargs: Dict[str, Any] = {
+                    "samplerate": self.input_sample_rate,
+                    "channels": self.channels,
+                    "dtype": "int16",
+                    "callback": self._input_callback,
+                    "blocksize": 512,
+                }
+                if self.current_device_id is not None:
+                    stream_kwargs["device"] = self.current_device_id
+
+                self._input_stream = sd.InputStream(**stream_kwargs)
                 self._input_stream.start()
             except Exception as e:
-                print(f"[AudioManager] Warning: Could not initialize mic InputStream: {e}")
+                logger.warning("Could not initialize mic InputStream: %s", e)
 
-        # Start playback consumer task
-        self._playback_task = asyncio.create_task(self._playback_worker())
-
-    async def _playback_worker(self) -> None:
-        """Consumes PCM chunks from speaker_queue and outputs to sounddevice."""
-        while self.is_running:
             try:
-                chunk = await self.speaker_queue.get()
-                if not chunk:
-                    continue
-
-                self.is_playing = True
-                if sd is not None:
-                    # Convert raw 16-bit PCM to numpy array and play via sd.play
-                    audio_array = np.frombuffer(chunk, dtype=np.int16)
-                    sd.play(audio_array, samplerate=self.output_sample_rate, blocking=False)
-                    # Estimate playback duration
-                    duration = len(audio_array) / self.output_sample_rate
-                    await asyncio.sleep(duration)
-                else:
-                    await asyncio.sleep(0.02)
-
-                if self.speaker_queue.empty():
-                    self.is_playing = False
-            except asyncio.CancelledError:
-                break
+                # 2. Continuous Jitter-Free RawOutputStream
+                self._output_stream = sd.RawOutputStream(
+                    samplerate=self.output_sample_rate,
+                    channels=self.channels,
+                    dtype="int16",
+                    callback=self._output_callback,
+                    blocksize=512,
+                )
+                self._output_stream.start()
             except Exception as e:
-                print(f"[AudioManager] Playback error: {e}")
-                self.is_playing = False
+                logger.warning("Could not initialize speaker RawOutputStream: %s", e)
+
+        # Start backward-compatible feeder task for speaker_queue
+        self._feeder_task = asyncio.create_task(self._queue_feeder_worker())
 
     async def stop(self) -> None:
         """Stops all streams and workers gracefully."""
         self.is_running = False
         self.clear_playback()
 
-        if self._playback_task:
-            self._playback_task.cancel()
+        if self._feeder_task:
+            self._feeder_task.cancel()
             try:
-                await self._playback_task
+                await self._feeder_task
             except asyncio.CancelledError:
                 pass
 
         if self._input_stream:
-            self._input_stream.stop()
-            self._input_stream.close()
+            try:
+                self._input_stream.stop()
+                self._input_stream.close()
+            except Exception:
+                pass
             self._input_stream = None
 
+        if self._output_stream:
+            try:
+                self._output_stream.stop()
+                self._output_stream.close()
+            except Exception:
+                pass
+            self._output_stream = None
+
         if sd is not None:
-            sd.stop()
+            try:
+                sd.stop()
+            except Exception:
+                pass

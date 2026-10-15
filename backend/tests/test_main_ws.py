@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 import pytest
 from starlette.testclient import TestClient
 from backend.main import app, hub
@@ -37,9 +38,11 @@ def test_websocket_telemetry_handshake_and_ptt(test_client):
 
         # 2. Test sending PTT event
         ws.send_text(json.dumps({"type": "ptt_event", "state": "down"}))
+        time.sleep(0.05)
         assert hub.audio.ptt_active is True
 
         ws.send_text(json.dumps({"type": "ptt_event", "state": "up"}))
+        time.sleep(0.05)
         assert hub.audio.ptt_active is False
 
 

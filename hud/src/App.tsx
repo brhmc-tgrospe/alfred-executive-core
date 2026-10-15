@@ -13,6 +13,7 @@ export function App() {
     connected,
     micActive,
     toggleMic,
+    switchInputDevice,
     sendApproval,
     sendInspectScreen,
     sendTextPrompt,
@@ -122,6 +123,10 @@ export function App() {
           status={state.status}
           cpu={state.cpu}
           ram={state.ram}
+          rmsVolume={state.rms_volume}
+          inputDevices={state.input_devices}
+          currentDeviceId={state.current_device_id}
+          onSwitchInputDevice={switchInputDevice}
           activeTool={state.active_tool}
           connected={connected}
           micActive={micActive}

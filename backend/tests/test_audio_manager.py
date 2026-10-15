@@ -48,7 +48,8 @@ def test_acoustic_gate_logic():
     mgr.is_playing = False
     assert mgr.should_stream_mic(rms=0.05) is True
 
-    # 2. Speaking mode: ALFRED is speaking -> low rms mic audio is blocked (acoustic gate)
+    # 2. Speaking mode: ALFRED is speaking and PTT is inactive -> low rms mic audio is blocked
+    mgr.set_push_to_talk(False)
     mgr.is_playing = True
     assert mgr.should_stream_mic(rms=0.05) is False
 
@@ -68,7 +69,7 @@ async def test_input_callback_thread_safety():
     mgr.is_running = True
     mgr._loop = asyncio.get_running_loop()
 
-    # Simulate raw PCM buffer from PortAudio thread
+    # Simulate raw PCM buffer from PortAudio thread (sample value 32 = 0x0020)
     raw_chunk = b"\x20\x00" * 256
     mgr._input_callback(raw_chunk, 256, None, None)
 
@@ -77,5 +78,7 @@ async def test_input_callback_thread_safety():
 
     assert not mgr.mic_queue.empty()
     queued = mgr.mic_queue.get_nowait()
-    assert queued == raw_chunk
+    # Verifies digital pre-amp gain (* 2.5: 32 -> 80 = 0x0050)
+    expected_chunk = b"\x50\x00" * 256
+    assert queued == expected_chunk
     assert mgr.current_mic_rms > 0.0

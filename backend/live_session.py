@@ -154,15 +154,28 @@ class AlfredLiveCore:
                 if self.status != "speaking":
                     self.set_status("listening")
 
-                await session.send(
-                    input={"data": chunk, "mime_type": "audio/pcm;rate=16000"},
-                    end_of_turn=False,
-                )
+                if hasattr(session, "send_realtime_input"):
+                    await session.send_realtime_input(
+                        audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
+                    )
+                else:
+                    await session.send(
+                        input={"data": chunk, "mime_type": "audio/pcm;rate=16000"},
+                        end_of_turn=False,
+                    )
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Error streaming mic chunk to Live API: %s", e)
                 await asyncio.sleep(0.05)
+
+    async def _wait_drain_and_transition(self) -> None:
+        """Waits for continuous speaker playback buffer to drain to 0 bytes, then resets HUD status."""
+        await self.audio_manager.wait_for_playback_drain()
+        if self.status == "speaking":
+            next_status = "listening" if self.audio_manager.ptt_active else "idle"
+            self.set_status(next_status)
+            logger.info("[A.L.F.R.E.D.] Speech playback drained. Status transitioned to: %s", next_status)
 
     async def process_server_response(self, response: Any, session: Any = None) -> None:
         """Processes a single Live API server response message (content, interruption, or tool calls)."""
@@ -181,13 +194,18 @@ class AlfredLiveCore:
                 for part in model_turn.parts:
                     if part.inline_data and part.inline_data.data:
                         self.set_status("speaking")
-                        await self.audio_manager.speaker_queue.put(part.inline_data.data)
+                        self.audio_manager.feed_speaker_audio(part.inline_data.data)
 
                     if getattr(part, "text", None):
                         if self.on_transcript:
                             self.on_transcript(part.text)
 
-        # 3. Tool Calls Dispatching
+            # 3. Model Turn Complete
+            if getattr(server_content, "turn_complete", False):
+                self.audio_manager.mark_turn_complete()
+                asyncio.create_task(self._wait_drain_and_transition())
+
+        # 4. Tool Calls Dispatching
         tool_call = getattr(response, "tool_call", None)
         if tool_call is not None:
             function_calls = getattr(tool_call, "function_calls", [])

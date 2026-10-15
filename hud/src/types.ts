@@ -7,6 +7,13 @@ export interface PendingApproval {
   risk_level: string;
 }
 
+export interface AudioDevice {
+  id: number;
+  name: string;
+  channels: number;
+  is_default?: boolean;
+}
+
 export interface AlfredStatePacket {
   type: "state";
   status: AlfredStatus;
@@ -16,6 +23,8 @@ export interface AlfredStatePacket {
   transcript: string;
   active_tool: string | null;
   pending_approval: PendingApproval | null;
+  input_devices?: AudioDevice[];
+  current_device_id?: number | null;
 }
 
 export interface ElectronAPI {

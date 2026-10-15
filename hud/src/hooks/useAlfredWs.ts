@@ -74,7 +74,7 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
     };
   }, [connect]);
 
-  const [micActive, setMicActive] = useState<boolean>(false);
+  const [micActive, setMicActive] = useState<boolean>(true);
 
   const sendApproval = useCallback((id: string, approved: boolean) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -99,6 +99,13 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
       }
       return next;
     });
+  }, []);
+
+  const switchInputDevice = useCallback((deviceId: number) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "set_input_device", device_id: deviceId }));
+    }
+    setState((prev) => ({ ...prev, current_device_id: deviceId }));
   }, []);
 
   const sendTextPrompt = useCallback((text: string) => {
@@ -144,6 +151,7 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
     connected,
     micActive,
     toggleMic,
+    switchInputDevice,
     sendApproval,
     sendPtt,
     sendTextPrompt,

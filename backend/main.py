@@ -116,6 +116,7 @@ class AlfredHubCoordinator:
         self._pulse_task: Optional[asyncio.Task] = None
         self._fallback_task: Optional[asyncio.Task] = None
         self.simulated_rms: float = 0.0
+        self.cached_devices = self.audio.list_input_devices()
         self.is_running: bool = False
 
     async def handle_pending_approval(self, payload: dict) -> None:
@@ -147,6 +148,8 @@ class AlfredHubCoordinator:
             "transcript": self.current_transcript,
             "active_tool": self.live_core.active_tool,
             "pending_approval": self.pending_approval,
+            "input_devices": self.cached_devices,
+            "current_device_id": getattr(self.audio, "current_device_id", None),
         }
 
     async def broadcast_state_packet(self) -> None:
@@ -265,6 +268,14 @@ class AlfredHubCoordinator:
             self.audio.set_push_to_talk(pressed)
             logger.debug("Push-to-Talk set: %s (state: %s)", pressed, state)
             await self.broadcast_state_packet()
+
+        elif msg_type == "set_input_device":
+            device_id = message_data.get("device_id")
+            if device_id is not None:
+                self.audio.switch_input_device(device_id)
+                self.cached_devices = self.audio.list_input_devices()
+                logger.info("Microphone input device switched to ID %s", device_id)
+                await self.broadcast_state_packet()
 
         elif msg_type == "simulate_pulse":
             intensity = float(message_data.get("intensity", 0.85))

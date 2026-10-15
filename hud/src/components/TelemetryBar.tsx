@@ -1,10 +1,14 @@
-import type { AlfredStatus } from "../types";
+import type { AlfredStatus, AudioDevice } from "../types";
 import { Cpu, HardDrive, Terminal, Eye, Disc, Mic, MicOff, MousePointerClick } from "lucide-react";
 
 interface TelemetryBarProps {
   status: AlfredStatus;
   cpu: number;
   ram: number;
+  rmsVolume?: number;
+  inputDevices?: AudioDevice[];
+  currentDeviceId?: number | null;
+  onSwitchInputDevice?: (deviceId: number) => void;
   activeTool: string | null;
   connected: boolean;
   micActive: boolean;
@@ -54,6 +58,10 @@ export function TelemetryBar({
   status,
   cpu,
   ram,
+  rmsVolume = 0.0,
+  inputDevices = [],
+  currentDeviceId = null,
+  onSwitchInputDevice,
   activeTool,
   connected,
   micActive,
@@ -70,7 +78,7 @@ export function TelemetryBar({
     <header
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      className="w-full max-w-4xl mx-auto rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-cyan-500/30 px-5 py-3 shadow-[0_8px_32px_rgba(0,0,0,0.6)] flex items-center justify-between gap-4 text-xs select-none transition-all duration-200"
+      className="w-full max-w-5xl mx-auto rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-cyan-500/30 px-5 py-3 shadow-[0_8px_32px_rgba(0,0,0,0.6)] flex items-center justify-between gap-3 text-xs select-none transition-all duration-200"
     >
       {/* Brand & Connection Status */}
       <div className="flex items-center gap-3">
@@ -98,11 +106,11 @@ export function TelemetryBar({
         </div>
       </div>
 
-      {/* Middle: Active Tool Ticker, Toggle-to-Talk, and Click-Through Lock */}
-      <div className="flex-1 flex items-center justify-center min-w-0 px-2 gap-2.5">
+      {/* Middle: Active Tool, Mic Toggle, Mic Level Meter, Device Selector & Click-Through Lock */}
+      <div className="flex-1 flex items-center justify-center min-w-0 px-2 gap-2 flex-wrap">
         {activeTool && (
-          <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 font-mono text-[11px] animate-pulse truncate max-w-xs">
-            <Terminal className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 font-mono text-[10px] animate-pulse truncate max-w-xs">
+            <Terminal className="w-3 h-3 shrink-0 text-amber-400" />
             <span className="truncate">TOOL: {activeTool}</span>
           </div>
         )}
@@ -111,7 +119,7 @@ export function TelemetryBar({
         <button
           onClick={onToggleMic}
           title={micActive ? "Mic Live (Click or Ctrl+Space to Mute)" : "Mic Muted (Click or Ctrl+Space to Talk)"}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-xl font-mono text-[11px] font-bold transition-all duration-200 cursor-pointer border ${
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl font-mono text-[10px] font-bold transition-all duration-200 cursor-pointer border ${
             micActive
               ? "bg-emerald-500/20 border-emerald-400/60 text-emerald-300 shadow-[0_0_15px_rgba(16,185,129,0.35)]"
               : "bg-slate-900/80 border-slate-700/60 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/40"
@@ -133,6 +141,45 @@ export function TelemetryBar({
             </>
           )}
         </button>
+
+        {/* Live Mic Input Level Meter */}
+        {micActive && (
+          <div
+            className="flex items-center gap-1.5 px-2 py-1 rounded-xl bg-slate-900/80 border border-slate-700/60 text-slate-300"
+            title={`Microphone Input Level: ${(rmsVolume * 100).toFixed(0)}%`}
+          >
+            <span className="font-mono text-[9px] text-slate-400 hidden sm:inline">LVL</span>
+            <div className="w-12 h-1.5 bg-slate-800 rounded-full overflow-hidden flex items-center p-0.5">
+              <div
+                className={`h-full rounded-full transition-all duration-75 ${
+                  rmsVolume > 0.6
+                    ? "bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]"
+                    : rmsVolume > 0.04
+                    ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]"
+                    : "bg-cyan-500/30"
+                }`}
+                style={{ width: `${Math.min(100, Math.max(8, rmsVolume * 100))}%` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Microphone Device Dropdown Selector */}
+        {inputDevices && inputDevices.length > 0 && (
+          <div className="flex items-center" title="Select Microphone Hardware Device">
+            <select
+              value={currentDeviceId ?? (inputDevices.find((d) => d.is_default)?.id ?? inputDevices[0]?.id)}
+              onChange={(e) => onSwitchInputDevice?.(Number(e.target.value))}
+              className="bg-slate-900/90 hover:bg-slate-900 border border-slate-700/80 hover:border-cyan-500/40 text-cyan-200 font-mono text-[10px] rounded-xl px-2 py-1 outline-none cursor-pointer max-w-[130px] sm:max-w-[155px] truncate transition-colors"
+            >
+              {inputDevices.map((dev) => (
+                <option key={dev.id} value={dev.id} className="bg-slate-950 text-slate-200">
+                  {dev.name.length > 22 ? dev.name.slice(0, 20) + "..." : dev.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Click-Through Interactivity Lock Button */}
         {onToggleClickThrough && (
