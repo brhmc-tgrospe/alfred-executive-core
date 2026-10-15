@@ -25,6 +25,7 @@ export interface ElectronAPI {
 
 declare global {
   interface Window {
+    alfredElectron?: ElectronAPI;
     electronAPI?: ElectronAPI;
   }
 }

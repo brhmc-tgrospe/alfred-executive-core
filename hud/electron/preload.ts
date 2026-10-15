@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-contextBridge.exposeInMainWorld("electronAPI", {
+const electronBridge = {
   setIgnoreMouseEvents: (ignore: boolean, options?: { forward: boolean }) => {
     ipcRenderer.send("set-ignore-mouse-events", ignore, options);
   },
@@ -11,4 +11,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener("ptt-triggered", handler);
     };
   },
-});
+};
+
+// Expose both alfredElectron and electronAPI for seamless compatibility
+contextBridge.exposeInMainWorld("alfredElectron", electronBridge);
+contextBridge.exposeInMainWorld("electronAPI", electronBridge);

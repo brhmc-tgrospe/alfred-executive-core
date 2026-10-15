@@ -9,6 +9,13 @@ echo                 Response ^& Executive Director
 echo =====================================================================
 echo.
 
+:: 0. Clean Up Zombie Processes (Port 8765 & Electron)
+echo [CLEANUP] Ensuring port 8765 and Electron are clear of stale processes...
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"
+taskkill /F /IM electron.exe >nul 2>&1
+taskkill /fi "WINDOWTITLE eq ALFRED-Backend*" /t /f >nul 2>&1
+timeout /t 1 /nobreak > nul
+
 :: 1. Verify Virtual Environment
 if not exist ".venv\Scripts\python.exe" (
     echo [ERROR] Python virtual environment not found in .venv.
@@ -45,5 +52,7 @@ cd ..
 
 echo.
 echo [SHUTTING DOWN] Closing background services...
+powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"
 taskkill /fi "WINDOWTITLE eq ALFRED-Backend*" /t /f > nul 2>&1
+taskkill /F /IM electron.exe >nul 2>&1
 echo System nominal. Goodbye, Sir.

@@ -17,17 +17,27 @@ export function App() {
     sendInspectScreen,
     sendTextPrompt,
     pulseRms,
+    simulateApproval: sendSimulateApproval,
     injectMockState,
   } = useAlfredWs();
 
+  const getElectronBridge = () => {
+    if (typeof window !== "undefined") {
+      return window.alfredElectron || window.electronAPI;
+    }
+    return undefined;
+  };
+
   // Show simulation controls when running in web browser without Electron
-  const isElectron = typeof window !== "undefined" && Boolean(window.electronAPI);
+  const isElectron = typeof window !== "undefined" && Boolean(getElectronBridge());
   const [showSimControls, setShowSimControls] = useState<boolean>(!isElectron);
+  const [clickThroughLocked, setClickThroughLocked] = useState<boolean>(false);
 
   // Toggle-to-Talk via Electron IPC or browser Ctrl+Space
   useEffect(() => {
-    if (window.electronAPI?.onPttTriggered) {
-      const unsubscribe = window.electronAPI.onPttTriggered(() => {
+    const electron = getElectronBridge();
+    if (electron?.onPttTriggered) {
+      const unsubscribe = electron.onPttTriggered(() => {
         toggleMic();
       });
       return unsubscribe;
@@ -45,15 +55,33 @@ export function App() {
 
   // Mouse event IPC forwarder for Electron transparent overlay
   const handlePanelMouseEnter = useCallback(() => {
-    if (window.electronAPI) {
-      window.electronAPI.setIgnoreMouseEvents(false);
+    const electron = getElectronBridge();
+    if (electron) {
+      electron.setIgnoreMouseEvents(false);
     }
   }, []);
 
   const handlePanelMouseLeave = useCallback(() => {
-    if (window.electronAPI) {
-      window.electronAPI.setIgnoreMouseEvents(true, { forward: true });
+    if (clickThroughLocked) return;
+    const electron = getElectronBridge();
+    if (electron) {
+      electron.setIgnoreMouseEvents(true, { forward: true });
     }
+  }, [clickThroughLocked]);
+
+  const toggleClickThrough = useCallback(() => {
+    setClickThroughLocked((prev) => {
+      const next = !prev;
+      const electron = getElectronBridge();
+      if (electron) {
+        if (next) {
+          electron.setIgnoreMouseEvents(false);
+        } else {
+          electron.setIgnoreMouseEvents(true, { forward: true });
+        }
+      }
+      return next;
+    });
   }, []);
 
   // Simulation helpers for verification
@@ -67,24 +95,28 @@ export function App() {
     });
   };
 
-  const simulateApproval = () => {
-    injectMockState({
-      status: "thinking",
-      rms_volume: 0.1,
-      transcript: "I require your executive clearance to terminate anomalous background worker tasks, Sir.",
-      active_tool: "execute_terminal_command",
-      pending_approval: {
-        id: `req-${Math.floor(1000 + Math.random() * 9000)}`,
-        action: "execute_terminal_command",
-        command: "Stop-Process -Name 'rogue_process' -Force",
-        risk_level: "HIGH",
-      },
-    });
+  const handleSimulateApproval = () => {
+    if (connected) {
+      sendSimulateApproval();
+    } else {
+      injectMockState({
+        status: "thinking",
+        rms_volume: 0.1,
+        transcript: "I require your executive clearance to terminate anomalous background worker tasks, Sir.",
+        active_tool: "execute_terminal_command",
+        pending_approval: {
+          id: `req-${Math.floor(1000 + Math.random() * 9000)}`,
+          action: "execute_terminal_command",
+          command: "Stop-Process -Name 'rogue_process' -Force",
+          risk_level: "HIGH",
+        },
+      });
+    }
   };
 
   return (
     <main className="w-screen h-screen relative flex flex-col justify-between p-6 overflow-hidden pointer-events-none select-none bg-transparent">
-      {/* 1. Top Telemetry Bar with Toggle-to-Talk */}
+      {/* 1. Top Telemetry Bar with Toggle-to-Talk & Interactivity Lock */}
       <div className="w-full flex justify-center pointer-events-auto">
         <TelemetryBar
           status={state.status}
@@ -93,7 +125,9 @@ export function App() {
           activeTool={state.active_tool}
           connected={connected}
           micActive={micActive}
+          clickThroughLocked={clickThroughLocked}
           onToggleMic={toggleMic}
+          onToggleClickThrough={toggleClickThrough}
           onInspectScreen={sendInspectScreen}
           onMouseEnter={handlePanelMouseEnter}
           onMouseLeave={handlePanelMouseLeave}
@@ -202,7 +236,7 @@ export function App() {
                 <span>Sim Think</span>
               </button>
               <button
-                onClick={simulateApproval}
+                onClick={handleSimulateApproval}
                 className="px-2.5 py-1.5 rounded bg-slate-900 hover:bg-red-950/60 text-rose-300 border border-rose-500/30 text-left transition-colors flex items-center gap-1.5 cursor-pointer"
               >
                 <ShieldAlert className="w-3 h-3 text-rose-400" />

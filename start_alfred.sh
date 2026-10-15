@@ -6,6 +6,12 @@ echo "          A.L.F.R.E.D. - Autonomous Logistics Functional"
 echo "                Response & Executive Director"
 echo "====================================================================="
 
+# 0. Clean up any stale processes on port 8765 or Electron
+if command -v lsof >/dev/null 2>&1; then
+    lsof -ti:8765 | xargs kill -9 2>/dev/null || true
+fi
+pkill -f electron 2>/dev/null || true
+
 # 1. Check Python Virtual Environment
 if [ -f ".venv/bin/activate" ]; then
     source .venv/bin/activate
@@ -34,6 +40,7 @@ cleanup() {
     echo ""
     echo "[SHUTTING DOWN] Stopping background backend (PID: $BACKEND_PID)..."
     kill "$BACKEND_PID" 2>/dev/null || true
+    pkill -f electron 2>/dev/null || true
     echo "Systems offline. Goodbye, Sir."
 }
 trap cleanup EXIT INT TERM

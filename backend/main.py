@@ -113,6 +113,9 @@ class AlfredHubCoordinator:
         self._metrics_task: Optional[asyncio.Task] = None
         self._broadcast_task: Optional[asyncio.Task] = None
         self._live_task: Optional[asyncio.Task] = None
+        self._pulse_task: Optional[asyncio.Task] = None
+        self._fallback_task: Optional[asyncio.Task] = None
+        self.simulated_rms: float = 0.0
         self.is_running: bool = False
 
     async def handle_pending_approval(self, payload: dict) -> None:
@@ -134,10 +137,11 @@ class AlfredHubCoordinator:
 
     def get_state_payload(self) -> dict:
         """Assembles the current HUD state JSON packet."""
+        effective_rms = max(self.audio.current_mic_rms, self.simulated_rms)
         return {
             "type": "state",
             "status": self.live_core.status,
-            "rms_volume": self.audio.current_mic_rms,
+            "rms_volume": effective_rms,
             "cpu": self.cached_cpu,
             "ram": self.cached_ram,
             "transcript": self.current_transcript,
@@ -189,6 +193,57 @@ class AlfredHubCoordinator:
                 logger.error("Error in telemetry broadcast loop: %s", e)
                 await asyncio.sleep(0.05)
 
+    async def trigger_simulated_pulse(self, intensity: float = 0.85) -> None:
+        """Simulates an elevated audio RMS pulse decaying over ~800ms."""
+        if self._pulse_task and not self._pulse_task.done():
+            self._pulse_task.cancel()
+
+        async def _decay():
+            try:
+                self.simulated_rms = intensity
+                steps = 16
+                for i in range(steps):
+                    await asyncio.sleep(0.05)
+                    self.simulated_rms = max(0.0, intensity * (1.0 - (i + 1) / steps))
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self.simulated_rms = 0.0
+
+        self._pulse_task = asyncio.create_task(_decay())
+
+    async def _execute_fallback_prompt(self, text: str) -> None:
+        """Generates an immediate executive fallback response when Gemini Live is in standby or offline."""
+        self.live_core.set_status("thinking")
+        self.current_transcript = f"› Directive: \"{text}\""
+        await self.broadcast_state_packet()
+        await asyncio.sleep(0.3)
+
+        lower = text.lower()
+        if "status" in lower or "report" in lower:
+            diag = self.logistics.get_system_diagnostics()
+            response = f"Systems nominal, Sir. CPU load is at {diag.get('cpu_usage_percent')}%, memory consumption at {diag.get('ram_usage_percent')}%. Executive logistics core is fully operational."
+        elif "diagnostic" in lower or "telemetry" in lower or "system" in lower:
+            diag = self.logistics.get_system_diagnostics()
+            response = f"Diagnostics complete. OS: {diag.get('platform')}, Python: {diag.get('python_version')}, Disk: {diag.get('disk_usage_percent')}%. All secondary buffers operational."
+        elif "screen" in lower or "inspect" in lower or "look" in lower:
+            screen_res = self.logistics.inspect_active_screen()
+            response = f"Visual cortex engaged. Screen snapshot captured at {screen_res.get('width')}x{screen_res.get('height')} resolution and verified, Sir."
+        elif "briefing" in lower:
+            brief = self.logistics.manage_executive_briefing(action="read")
+            response = f"Executive briefing on record: {brief}"
+        else:
+            response = f"Directive acknowledged: \"{text}\". Core logistics standing by. (Gemini Live API is currently in standby mode)."
+
+        self.live_core.set_status("speaking")
+        self.current_transcript = response
+        await self.trigger_simulated_pulse(0.75)
+        await self.broadcast_state_packet()
+        await asyncio.sleep(1.2)
+        if self.live_core.status == "speaking":
+            self.live_core.set_status("idle")
+            await self.broadcast_state_packet()
+
     async def handle_hud_message(self, message_data: dict) -> None:
         """Routes inbound commands from the Electron HUD."""
         msg_type = message_data.get("type", "")
@@ -211,24 +266,57 @@ class AlfredHubCoordinator:
             logger.debug("Push-to-Talk set: %s (state: %s)", pressed, state)
             await self.broadcast_state_packet()
 
+        elif msg_type == "simulate_pulse":
+            intensity = float(message_data.get("intensity", 0.85))
+            logger.info("Triggering backend simulated audio pulse (intensity: %.2f)", intensity)
+            await self.trigger_simulated_pulse(intensity)
+            await self.broadcast_state_packet()
+
+        elif msg_type == "simulate_approval":
+            logger.info("Triggering simulated security approval gate from HUD")
+            req_id = f"sim-{os.urandom(2).hex()}"
+            command = message_data.get("command", "Stop-Process -Name 'anomalous_worker' -Force")
+            payload = {
+                "id": req_id,
+                "action": "execute_terminal_command",
+                "command": command,
+                "risk_level": "HIGH",
+                "timeout": 30.0,
+            }
+            await self.handle_pending_approval(payload)
+
         elif msg_type == "text_prompt":
-            text = message_data.get("text", "")
-            if text and self.live_core._session:
-                logger.info("Injecting text prompt from HUD: %s", text)
-                await self.live_core._session.send(input=text, end_of_turn=True)
-            elif text:
-                logger.info("Received text prompt (no active Live session): %s", text)
-                self.current_transcript = f"Directive received: {text}"
-                await self.broadcast_state_packet()
+            text = message_data.get("text", "").strip()
+            if not text:
+                return
+
+            if self.live_core._session and self.live_core.is_running:
+                try:
+                    logger.info("Injecting text prompt into active Live session: %s", text)
+                    self.live_core.set_status("thinking")
+                    self.current_transcript = f"› Directive: \"{text}\""
+                    await self.broadcast_state_packet()
+                    await self.live_core._session.send(input=text, end_of_turn=True)
+                except Exception as e:
+                    logger.warning("Failed to send prompt to Live session (%s), falling back", e)
+                    await self._execute_fallback_prompt(text)
+            else:
+                logger.info("No active Live session. Executing executive fallback for: %s", text)
+                await self._execute_fallback_prompt(text)
 
         elif msg_type == "inspect_screen_trigger":
             logger.info("Manual inspect screen triggered from HUD.")
-            if self.live_core._session:
-                jpeg_bytes = self.vision.capture_screen_jpeg()
-                await self.live_core._session.send(
-                    input={"data": jpeg_bytes, "mime_type": "image/jpeg"},
-                    end_of_turn=False,
-                )
+            if self.live_core._session and self.live_core.is_running:
+                try:
+                    jpeg_bytes = self.vision.capture_screen_jpeg()
+                    await self.live_core._session.send(
+                        input={"data": jpeg_bytes, "mime_type": "image/jpeg"},
+                        end_of_turn=False,
+                    )
+                except Exception as e:
+                    logger.warning("Failed to stream screen to Live session: %s", e)
+            else:
+                await self._execute_fallback_prompt("Inspect active screen.")
 
     async def start(self, start_live_session: bool = True) -> None:
         """Starts background workers and optionally connects to Gemini Live API."""
@@ -254,6 +342,10 @@ class AlfredHubCoordinator:
             self._broadcast_task.cancel()
         if self._live_task:
             self._live_task.cancel()
+        if self._pulse_task:
+            self._pulse_task.cancel()
+        if self._fallback_task:
+            self._fallback_task.cancel()
 
         await self.live_core.stop()
         self.memory.close()

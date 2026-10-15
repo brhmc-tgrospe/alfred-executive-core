@@ -115,16 +115,17 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
   }, []);
 
   const pulseRms = useCallback((intensity = 0.85) => {
-    setState((prev) => ({ ...prev, rms_volume: intensity }));
-    let decayVal = intensity;
-    const interval = setInterval(() => {
-      decayVal *= 0.7;
-      if (decayVal < 0.02) {
-        decayVal = 0.0;
-        clearInterval(interval);
-      }
-      setState((prev) => ({ ...prev, rms_volume: Number(decayVal.toFixed(3)) }));
-    }, 40);
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "simulate_pulse", intensity }));
+    }
+    // Optimistically elevate locally for instant zero-latency feedback
+    setState((prev) => ({ ...prev, rms_volume: intensity, status: "speaking" }));
+  }, []);
+
+  const simulateApproval = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "simulate_approval" }));
+    }
   }, []);
 
   const sendInspectScreen = useCallback(() => {
@@ -147,6 +148,7 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
     sendPtt,
     sendTextPrompt,
     pulseRms,
+    simulateApproval,
     sendInspectScreen,
     injectMockState,
   };

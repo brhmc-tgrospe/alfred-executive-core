@@ -38,7 +38,7 @@ class AlfredLiveCore:
         audio_manager: AudioManager,
         vision_manager: Optional[VisionManager] = None,
         api_key: Optional[str] = None,
-        model_id: str = "gemini-2.5-flash",
+        model_id: str = "gemini-3.8-live",
         voice_name: Optional[str] = None,
         on_status_change: Optional[Callable[[str], None]] = None,
         on_active_tool_change: Optional[Callable[[Optional[str]], None]] = None,
@@ -46,7 +46,7 @@ class AlfredLiveCore:
     ) -> None:
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
         self.client = genai.Client(api_key=self.api_key) if self.api_key else None
-        self.model_id = model_id
+        self.model_id = os.environ.get("GEMINI_LIVE_MODEL", model_id)
         self.voice_name = voice_name or os.environ.get("ALFRED_VOICE_NAME", "Fenrir")
 
         self.audio_manager = audio_manager
@@ -64,6 +64,11 @@ class AlfredLiveCore:
         self.is_running: bool = False
         self._loop_active: bool = False
         self._session: Any = None
+
+    def update_transcript(self, text: str) -> None:
+        """Notifies coordinator and connected HUD clients with status or transcript update."""
+        if self.on_transcript:
+            self.on_transcript(text)
 
     def set_status(self, new_status: str) -> None:
         """Updates internal status and fires callback to HUD."""
@@ -209,7 +214,10 @@ class AlfredLiveCore:
             return
 
         if not self.client:
-            raise ValueError("Gemini Client not initialized. Please verify GEMINI_API_KEY in .env.")
+            msg = "[LIVE API ERROR]: No GEMINI_API_KEY detected in .env."
+            logger.error(msg)
+            self.update_transcript(msg)
+            raise ValueError(msg)
 
         self.is_running = True
         await self.audio_manager.start()
@@ -231,21 +239,27 @@ class AlfredLiveCore:
         )
 
         logger.info("[ALFRED CORE] Connecting to Gemini Live API (%s)...", self.model_id)
+        self.update_transcript(f"[LIVE API]: Connecting to Gemini Live API ({self.model_id})...")
 
         try:
             async with self.client.aio.live.connect(model=self.model_id, config=config) as session:
                 self._session = session
                 self.set_status("listening")
-                print(f"[ALFRED CORE] Online. Connected to Gemini Live API ({self.model_id}). Standing by, Sir.")
+                connected_msg = f"[LIVE API]: Connected to {self.model_id} (Voice: {self.voice_name}). Standing by, Sir."
+                logger.info(connected_msg)
+                self.update_transcript(connected_msg)
 
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(self._stream_mic_to_alfred(session))
                     tg.create_task(self._receive_from_alfred(session))
 
         except Exception as e:
-            logger.error("Gemini Live session connection closed: %s", e)
+            disconnect_msg = f"[LIVE API DISCONNECTED]: {e}"
+            logger.error(disconnect_msg)
+            self.update_transcript(disconnect_msg)
         finally:
             self.is_running = False
+            self._session = None
             self.set_status("idle")
 
     async def run_executive_loop(self) -> None:
@@ -258,11 +272,13 @@ class AlfredLiveCore:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("[ALFRED CORE] Live session error in executive loop: %s", e)
+                err_msg = f"[LIVE API RETRYING in 3s]: {e}"
+                logger.error("[ALFRED CORE] %s", err_msg)
+                self.update_transcript(err_msg)
 
             if not self._loop_active:
                 break
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(3.0)
 
     async def stop(self) -> None:
         """Gracefully disconnects the session and halts audio streams."""

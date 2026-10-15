@@ -42,7 +42,11 @@ function createWindow() {
 // IPC Handlers for toggling mouse events when hovering over HUD widgets
 ipcMain.on("set-ignore-mouse-events", (_event, ignore: boolean, options?: { forward: boolean }) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.setIgnoreMouseEvents(ignore, options ?? { forward: true });
+    if (ignore) {
+      mainWindow.setIgnoreMouseEvents(true, options ?? { forward: true });
+    } else {
+      mainWindow.setIgnoreMouseEvents(false);
+    }
   }
 });
 

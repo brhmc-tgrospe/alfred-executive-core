@@ -1,5 +1,5 @@
 import type { AlfredStatus } from "../types";
-import { Cpu, HardDrive, Terminal, Eye, Disc, Mic, MicOff } from "lucide-react";
+import { Cpu, HardDrive, Terminal, Eye, Disc, Mic, MicOff, MousePointerClick } from "lucide-react";
 
 interface TelemetryBarProps {
   status: AlfredStatus;
@@ -8,7 +8,9 @@ interface TelemetryBarProps {
   activeTool: string | null;
   connected: boolean;
   micActive: boolean;
+  clickThroughLocked?: boolean;
   onToggleMic: () => void;
+  onToggleClickThrough?: () => void;
   onInspectScreen?: () => void;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
@@ -55,7 +57,9 @@ export function TelemetryBar({
   activeTool,
   connected,
   micActive,
+  clickThroughLocked = false,
   onToggleMic,
+  onToggleClickThrough,
   onInspectScreen,
   onMouseEnter,
   onMouseLeave,
@@ -94,8 +98,8 @@ export function TelemetryBar({
         </div>
       </div>
 
-      {/* Middle: Active Tool Ticker & Toggle-to-Talk Switch */}
-      <div className="flex-1 flex items-center justify-center min-w-0 px-2 gap-3">
+      {/* Middle: Active Tool Ticker, Toggle-to-Talk, and Click-Through Lock */}
+      <div className="flex-1 flex items-center justify-center min-w-0 px-2 gap-2.5">
         {activeTool && (
           <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 font-mono text-[11px] animate-pulse truncate max-w-xs">
             <Terminal className="w-3.5 h-3.5 shrink-0 text-amber-400" />
@@ -120,15 +124,35 @@ export function TelemetryBar({
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
               </span>
               <Mic className="w-3.5 h-3.5 text-emerald-400" />
-              <span>MIC LIVE [CTRL+SPACE]</span>
+              <span>MIC LIVE</span>
             </>
           ) : (
             <>
               <MicOff className="w-3.5 h-3.5 text-slate-500" />
-              <span>MIC MUTED [CTRL+SPACE]</span>
+              <span>MIC MUTED</span>
             </>
           )}
         </button>
+
+        {/* Click-Through Interactivity Lock Button */}
+        {onToggleClickThrough && (
+          <button
+            onClick={onToggleClickThrough}
+            title={
+              clickThroughLocked
+                ? "Click-Through is OFF (Interactivity is LOCKED ON). Click to enable desktop passthrough."
+                : "Click-Through is ON (Desktop passthrough active). Click to lock interactivity ON."
+            }
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl font-mono text-[10px] font-bold transition-all duration-200 cursor-pointer border ${
+              clickThroughLocked
+                ? "bg-amber-500/20 border-amber-400/60 text-amber-300 shadow-[0_0_15px_rgba(245,158,11,0.35)]"
+                : "bg-slate-900/80 border-slate-700/60 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/40"
+            }`}
+          >
+            <MousePointerClick className={`w-3 h-3 ${clickThroughLocked ? "text-amber-400" : "text-slate-400"}`} />
+            <span>CLICK-THROUGH: {clickThroughLocked ? "OFF" : "ON"}</span>
+          </button>
+        )}
       </div>
 
       {/* Right Side: System Telemetry & Screen Inspect */}
