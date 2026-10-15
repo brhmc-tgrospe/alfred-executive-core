@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 from typing import Optional, Set
 from dotenv import load_dotenv
@@ -25,6 +26,7 @@ from backend.audio_manager import AudioManager
 from backend.vision_manager import VisionManager
 from backend.memory.memory_store import MemoryStore
 from backend.tools.os_logistics import OSLogistics
+from backend.tools.dev_logistics import DevLogistics
 from backend.live_session import AlfredLiveCore
 
 load_dotenv()
@@ -68,6 +70,7 @@ class AlfredHubCoordinator:
         # Telemetry Cache
         self.cached_cpu: float = 0.0
         self.cached_ram: float = 0.0
+        self.cached_ping: float = 0.0
         self.current_transcript: str = "A.L.F.R.E.D. core initialized. Systems nominal."
         self.pending_approval: Optional[dict] = None
 
@@ -84,6 +87,9 @@ class AlfredHubCoordinator:
             approval_timeout=30.0,
         )
 
+        # Developer Logistics Tools
+        self.dev_logistics = DevLogistics()
+
         # List of tools to register with Gemini Live API
         self.tools_list = [
             self.logistics.get_system_diagnostics,
@@ -93,6 +99,10 @@ class AlfredHubCoordinator:
             self.logistics.remember_fact,
             self.logistics.recall_context,
             self.logistics.execute_terminal_command,
+            self.dev_logistics.inspect_git_workspace,
+            self.dev_logistics.inspect_local_dev_ports,
+            self.dev_logistics.probe_network_target,
+            self.dev_logistics.tail_log_file,
         ]
 
         # Gemini Live Core
@@ -145,6 +155,7 @@ class AlfredHubCoordinator:
             "rms_volume": effective_rms,
             "cpu": self.cached_cpu,
             "ram": self.cached_ram,
+            "ping_ms": self.cached_ping,
             "transcript": self.current_transcript,
             "active_tool": self.live_core.active_tool,
             "pending_approval": self.pending_approval,
@@ -172,11 +183,24 @@ class AlfredHubCoordinator:
                 self.connected_clients.difference_update(disconnected)
 
     async def _metrics_polling_loop(self) -> None:
-        """Polls psutil metrics every 2.0 seconds to eliminate CPU polling overhead."""
+        """Polls psutil metrics and measures 8.8.8.8 TCP ping every 2.0 seconds."""
         while self.is_running:
             try:
                 self.cached_cpu = round(psutil.cpu_percent(interval=None), 1)
                 self.cached_ram = round(psutil.virtual_memory().percent, 1)
+
+                # Async socket ping to 8.8.8.8 (port 53)
+                start_t = time.perf_counter()
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection("8.8.8.8", 53), timeout=1.5
+                    )
+                    writer.close()
+                    await writer.wait_closed()
+                    self.cached_ping = round((time.perf_counter() - start_t) * 1000.0, 1)
+                except Exception:
+                    self.cached_ping = -1.0
+
                 await asyncio.sleep(2.0)
             except asyncio.CancelledError:
                 break

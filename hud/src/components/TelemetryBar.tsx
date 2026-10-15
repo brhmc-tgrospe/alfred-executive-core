@@ -11,12 +11,17 @@ import {
   MousePointerClick,
   Monitor,
   LayoutGrid,
+  Gauge,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 
 interface TelemetryBarProps {
   status: AlfredStatus;
   cpu: number;
   ram: number;
+  pingMs?: number;
+  fps?: number;
   rmsVolume?: number;
   inputDevices?: AudioDevice[];
   currentDeviceId?: number | null;
@@ -74,6 +79,8 @@ export function TelemetryBar({
   status,
   cpu,
   ram,
+  pingMs = -1,
+  fps = 60,
   rmsVolume = 0.0,
   inputDevices = [],
   currentDeviceId = null,
@@ -221,23 +228,23 @@ export function TelemetryBar({
           </button>
         )}
 
-        {/* Layout Mode (Cinema vs Docked) Toggle */}
+        {/* Layout Mode (Cinema vs Docked vs Orb-Only) Toggle */}
         {onToggleLayout && (
           <button
             onClick={onToggleLayout}
-            title={
-              layoutMode === "cinema"
-                ? "Cinema Mode (AudioOrb centered). Click or press Ctrl+Shift+A to dock into corner."
-                : "Docked Mode (Center clear for coding). Click or press Ctrl+Shift+A for Cinema Mode."
-            }
+            title={`Layout Mode: ${layoutMode.toUpperCase()}. Click to cycle (Cinema -> Docked -> Orb-Only) or press Ctrl+Shift+A.`}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl font-mono text-[10px] font-bold transition-all duration-200 cursor-pointer border ${
               layoutMode === "docked"
                 ? "bg-cyan-500/20 border-cyan-400/60 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+                : layoutMode === "orb_only"
+                ? "bg-amber-500/20 border-amber-400/60 text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.3)]"
                 : "bg-slate-900/80 border-slate-700/60 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/40"
             }`}
           >
             {layoutMode === "docked" ? (
               <LayoutGrid className="w-3 h-3 text-cyan-400" />
+            ) : layoutMode === "orb_only" ? (
+              <Disc className="w-3 h-3 text-amber-400 animate-spin" />
             ) : (
               <Monitor className="w-3 h-3 text-slate-400" />
             )}
@@ -270,12 +277,12 @@ export function TelemetryBar({
         )}
       </div>
 
-      {/* Right Side: System Telemetry & Screen Inspect */}
-      <div className="flex items-center gap-4">
+      {/* Right Side: System Telemetry (CPU, RAM, PING, FPS) & Screen Inspect */}
+      <div className="flex items-center gap-3">
         {/* CPU Meter */}
         <div className="flex items-center gap-2">
           <Cpu className="w-3.5 h-3.5 text-slate-400" />
-          <div className="w-16">
+          <div className="w-14">
             <div className="flex justify-between text-[10px] font-mono text-slate-400 mb-0.5">
               <span>CPU</span>
               <span className={cpu > 80 ? "text-rose-400 font-bold" : "text-cyan-300"}>{cpu}%</span>
@@ -294,7 +301,7 @@ export function TelemetryBar({
         {/* RAM Meter */}
         <div className="flex items-center gap-2">
           <HardDrive className="w-3.5 h-3.5 text-slate-400" />
-          <div className="w-16">
+          <div className="w-14">
             <div className="flex justify-between text-[10px] font-mono text-slate-400 mb-0.5">
               <span>RAM</span>
               <span className={ram > 85 ? "text-rose-400 font-bold" : "text-cyan-300"}>{ram}%</span>
@@ -310,12 +317,72 @@ export function TelemetryBar({
           </div>
         </div>
 
+        {/* 8.8.8.8 Ping Latency */}
+        <div
+          className="flex items-center gap-1.5 px-2 py-1 rounded-xl bg-slate-900/80 border border-slate-700/60 font-mono text-[10px]"
+          title={
+            pingMs !== undefined && pingMs >= 0
+              ? `TCP Socket Latency to 8.8.8.8: ${pingMs} ms`
+              : "Network to 8.8.8.8 Offline or Unreachable"
+          }
+        >
+          {pingMs !== undefined && pingMs >= 0 ? (
+            <Wifi
+              className={`w-3.5 h-3.5 ${
+                pingMs < 50 ? "text-emerald-400" : pingMs <= 150 ? "text-amber-400" : "text-rose-400"
+              }`}
+            />
+          ) : (
+            <WifiOff className="w-3.5 h-3.5 text-rose-500" />
+          )}
+          <div className="flex items-center gap-1">
+            <span className="text-slate-400">PING</span>
+            {pingMs !== undefined && pingMs >= 0 ? (
+              <span
+                className={`font-bold ${
+                  pingMs < 50
+                    ? "text-emerald-300"
+                    : pingMs <= 150
+                    ? "text-amber-300"
+                    : "text-rose-400"
+                }`}
+              >
+                {Math.round(pingMs)}ms
+              </span>
+            ) : (
+              <span className="font-bold text-rose-400">ERR</span>
+            )}
+          </div>
+        </div>
+
+        {/* Real-time Render FPS */}
+        <div
+          className="flex items-center gap-1.5 px-2 py-1 rounded-xl bg-slate-900/80 border border-slate-700/60 font-mono text-[10px]"
+          title={`Real-Time HUD Render Rate: ${fps} FPS`}
+        >
+          <Gauge
+            className={`w-3.5 h-3.5 ${
+              fps >= 55 ? "text-emerald-400" : fps >= 30 ? "text-amber-400" : "text-rose-400"
+            }`}
+          />
+          <div className="flex items-center gap-1">
+            <span className="text-slate-400">FPS</span>
+            <span
+              className={`font-bold ${
+                fps >= 55 ? "text-emerald-300" : fps >= 30 ? "text-amber-300" : "text-rose-400"
+              }`}
+            >
+              {fps}
+            </span>
+          </div>
+        </div>
+
         {/* Vision Inspect Trigger Button */}
         {onInspectScreen && (
           <button
             onClick={onInspectScreen}
             title="Inspect Active Screen"
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-cyan-950/60 hover:bg-cyan-900/80 text-cyan-300 border border-cyan-500/30 hover:border-cyan-400 transition-colors font-mono text-[10px] cursor-pointer"
+            className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-cyan-950/60 hover:bg-cyan-900/80 text-cyan-300 border border-cyan-500/30 hover:border-cyan-400 transition-colors font-mono text-[10px] cursor-pointer"
           >
             <Eye className="w-3.5 h-3.5 text-cyan-400" />
             <span className="hidden sm:inline">INSPECT</span>

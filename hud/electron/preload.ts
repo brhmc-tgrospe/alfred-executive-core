@@ -21,6 +21,13 @@ const electronBridge = {
       ipcRenderer.removeListener("toggle-layout-mode", handler);
     };
   },
+  onSetLayoutMode: (callback: (mode: any) => void) => {
+    const handler = (_event: any, mode: any) => callback(mode);
+    ipcRenderer.on("set-layout-mode", handler);
+    return () => {
+      ipcRenderer.removeListener("set-layout-mode", handler);
+    };
+  },
 };
 
 // Expose both alfredElectron and electronAPI for seamless compatibility

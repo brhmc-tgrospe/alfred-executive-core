@@ -21,6 +21,7 @@ def test_health_endpoint(test_client):
     assert "telemetry" in data
     assert "cpu" in data["telemetry"]
     assert "ram" in data["telemetry"]
+    assert "ping_ms" in data["telemetry"]
 
 
 def test_websocket_telemetry_handshake_and_ptt(test_client):
@@ -33,6 +34,7 @@ def test_websocket_telemetry_handshake_and_ptt(test_client):
         assert "rms_volume" in state
         assert "cpu" in state
         assert "ram" in state
+        assert "ping_ms" in state
         assert "active_tool" in state
         assert "pending_approval" in state
 
@@ -61,6 +63,7 @@ def test_websocket_approval_resolution(test_client):
             "id": req_id,
             "approved": True,
         }))
+        time.sleep(0.05)
 
         # Verify future resolved
         assert future.done()

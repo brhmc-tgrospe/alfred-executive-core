@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { useAlfredWs } from "./hooks/useAlfredWs";
+import { useFps } from "./hooks/useFps";
 import { AudioOrb } from "./components/AudioOrb";
 import { TelemetryBar } from "./components/TelemetryBar";
 import { TranscriptDrawer } from "./components/TranscriptDrawer";
@@ -22,6 +23,8 @@ export function App() {
     injectMockState,
   } = useAlfredWs();
 
+  const fps = useFps();
+
   const getElectronBridge = () => {
     if (typeof window !== "undefined") {
       return window.alfredElectron || window.electronAPI;
@@ -36,8 +39,9 @@ export function App() {
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("cinema");
   const [stealthEnabled, setStealthEnabled] = useState<boolean>(true);
 
+  // 3-state layout cycle: cinema -> docked -> orb_only -> cinema
   const toggleLayoutMode = useCallback(() => {
-    setLayoutMode((prev) => (prev === "cinema" ? "docked" : "cinema"));
+    setLayoutMode((prev) => (prev === "cinema" ? "docked" : prev === "docked" ? "orb_only" : "cinema"));
   }, []);
 
   const toggleStealth = useCallback(() => {
@@ -51,7 +55,7 @@ export function App() {
     });
   }, []);
 
-  // Global hotkeys (Ctrl+Space for Mic, Ctrl+Shift+A for Layout Mode)
+  // Global hotkeys (Ctrl+Space for Mic, Ctrl+Shift+A for Layout Mode) and IPC listeners
   useEffect(() => {
     const electron = getElectronBridge();
     const unsubPtt = electron?.onPttTriggered?.(() => {
@@ -59,6 +63,9 @@ export function App() {
     });
     const unsubLayout = electron?.onToggleLayoutMode?.(() => {
       toggleLayoutMode();
+    });
+    const unsubSetLayout = electron?.onSetLayoutMode?.((mode: LayoutMode) => {
+      setLayoutMode(mode);
     });
 
     const handleKeyDown = (e: globalThis.KeyboardEvent) => {
@@ -74,6 +81,7 @@ export function App() {
     return () => {
       unsubPtt?.();
       unsubLayout?.();
+      unsubSetLayout?.();
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [toggleMic, toggleLayoutMode]);
@@ -141,33 +149,37 @@ export function App() {
 
   return (
     <main className="w-screen h-screen relative flex flex-col justify-between p-6 overflow-hidden pointer-events-none select-none bg-transparent">
-      {/* 1. Top Telemetry Bar with Toggle-to-Talk & Interactivity Lock */}
-      <div className="w-full flex justify-center pointer-events-auto">
-        <TelemetryBar
-          status={state.status}
-          cpu={state.cpu}
-          ram={state.ram}
-          rmsVolume={state.rms_volume}
-          inputDevices={state.input_devices}
-          currentDeviceId={state.current_device_id}
-          onSwitchInputDevice={switchInputDevice}
-          activeTool={state.active_tool}
-          connected={connected}
-          micActive={micActive}
-          clickThroughLocked={clickThroughLocked}
-          layoutMode={layoutMode}
-          stealthEnabled={stealthEnabled}
-          onToggleMic={toggleMic}
-          onToggleClickThrough={toggleClickThrough}
-          onToggleLayout={toggleLayoutMode}
-          onToggleStealth={toggleStealth}
-          onInspectScreen={sendInspectScreen}
-          onMouseEnter={handlePanelMouseEnter}
-          onMouseLeave={handlePanelMouseLeave}
-        />
-      </div>
+      {/* 1. Top Telemetry Bar with Toggle-to-Talk & Interactivity Lock (Hidden in Orb-Only mode) */}
+      {layoutMode !== "orb_only" && (
+        <div className="w-full flex justify-center pointer-events-auto">
+          <TelemetryBar
+            status={state.status}
+            cpu={state.cpu}
+            ram={state.ram}
+            pingMs={state.ping_ms}
+            fps={fps}
+            rmsVolume={state.rms_volume}
+            inputDevices={state.input_devices}
+            currentDeviceId={state.current_device_id}
+            onSwitchInputDevice={switchInputDevice}
+            activeTool={state.active_tool}
+            connected={connected}
+            micActive={micActive}
+            clickThroughLocked={clickThroughLocked}
+            layoutMode={layoutMode}
+            stealthEnabled={stealthEnabled}
+            onToggleMic={toggleMic}
+            onToggleClickThrough={toggleClickThrough}
+            onToggleLayout={toggleLayoutMode}
+            onToggleStealth={toggleStealth}
+            onInspectScreen={sendInspectScreen}
+            onMouseEnter={handlePanelMouseEnter}
+            onMouseLeave={handlePanelMouseLeave}
+          />
+        </div>
+      )}
 
-      {/* 2. AudioOrb: Cinema Mode (Center) vs Compact Corner Dock (Bottom-Right) */}
+      {/* 2. AudioOrb: Cinema Mode (Center) vs Compact Corner Dock vs Orb-Only */}
       {layoutMode === "cinema" ? (
         <div className="flex-1 flex flex-col items-center justify-center relative">
           <div className="pointer-events-auto">
@@ -195,7 +207,7 @@ export function App() {
             </span>
           </div>
         </div>
-      ) : (
+      ) : layoutMode === "docked" ? (
         <>
           {/* In Docked Mode, center monitor remains 100% unobstructed for coding */}
           <div className="flex-1" />
@@ -218,19 +230,57 @@ export function App() {
             </div>
           </aside>
         </>
+      ) : (
+        /* Orb-Only Minimalist Mode: Center 3D Orb with hover mini-pill */
+        <div className="flex-1 flex flex-col items-center justify-center relative">
+          <div
+            className="relative group pointer-events-auto flex flex-col items-center justify-center"
+            onMouseEnter={handlePanelMouseEnter}
+            onMouseLeave={handlePanelMouseLeave}
+          >
+            <AudioOrb
+              rmsVolume={state.rms_volume}
+              status={state.status}
+              size={320}
+            />
+
+            {/* Subtle floating mini-pill visible on hover over Orb in Orb-Only mode */}
+            <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-950/90 backdrop-blur-xl border border-cyan-500/40 shadow-[0_4px_24px_rgba(0,0,0,0.85)] text-[10px] font-mono select-none pointer-events-auto">
+              <span className="text-cyan-400 font-bold tracking-wider">ORB-ONLY</span>
+              <span className="text-slate-600">|</span>
+              <button
+                onClick={() => setLayoutMode("cinema")}
+                className="text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer px-1 py-0.5 rounded hover:bg-cyan-950/40"
+                title="Switch to Cinema Mode"
+              >
+                Cinema
+              </button>
+              <span className="text-slate-600">|</span>
+              <button
+                onClick={() => setLayoutMode("docked")}
+                className="text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer px-1 py-0.5 rounded hover:bg-cyan-950/40"
+                title="Switch to Docked Mode"
+              >
+                Docked
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* 3. Bottom Scrolling Transcript Drawer with Simulation Toolbar */}
-      <div className="w-full flex justify-center pointer-events-auto">
-        <TranscriptDrawer
-          transcript={state.transcript}
-          status={state.status}
-          onSendTextPrompt={sendTextPrompt}
-          onPulseRms={pulseRms}
-          onMouseEnter={handlePanelMouseEnter}
-          onMouseLeave={handlePanelMouseLeave}
-        />
-      </div>
+      {/* 3. Bottom Scrolling Transcript Drawer with Simulation Toolbar (Hidden in Orb-Only mode) */}
+      {layoutMode !== "orb_only" && (
+        <div className="w-full flex justify-center pointer-events-auto">
+          <TranscriptDrawer
+            transcript={state.transcript}
+            status={state.status}
+            onSendTextPrompt={sendTextPrompt}
+            onPulseRms={pulseRms}
+            onMouseEnter={handlePanelMouseEnter}
+            onMouseLeave={handlePanelMouseLeave}
+          />
+        </div>
+      )}
 
       {/* 4. High-Priority 30-Second Security Approval Modal */}
       {state.pending_approval && (

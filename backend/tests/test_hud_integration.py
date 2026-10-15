@@ -19,6 +19,7 @@ async def test_hud_contract_schema_alignment():
     assert isinstance(payload["rms_volume"], (int, float))
     assert isinstance(payload["cpu"], (int, float))
     assert isinstance(payload["ram"], (int, float))
+    assert isinstance(payload["ping_ms"], (int, float))
     assert isinstance(payload["transcript"], str)
     assert payload["active_tool"] is None or isinstance(payload["active_tool"], str)
     assert payload["pending_approval"] is None or isinstance(payload["pending_approval"], dict)

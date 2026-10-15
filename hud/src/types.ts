@@ -1,5 +1,5 @@
 export type AlfredStatus = "idle" | "listening" | "thinking" | "speaking";
-export type LayoutMode = "cinema" | "docked";
+export type LayoutMode = "cinema" | "docked" | "orb_only";
 
 export interface PendingApproval {
   id: string;
@@ -21,6 +21,7 @@ export interface AlfredStatePacket {
   rms_volume: number;
   cpu: number;
   ram: number;
+  ping_ms?: number;
   transcript: string;
   active_tool: string | null;
   pending_approval: PendingApproval | null;
@@ -33,6 +34,7 @@ export interface ElectronAPI {
   setContentProtection?: (enable: boolean) => void;
   onPttTriggered?: (callback: () => void) => () => void;
   onToggleLayoutMode?: (callback: () => void) => () => void;
+  onSetLayoutMode?: (callback: (mode: LayoutMode) => void) => () => void;
 }
 
 declare global {

@@ -19,6 +19,7 @@ from google.genai import types
 
 from backend.audio_manager import AudioManager
 from backend.vision_manager import VisionManager
+from backend.tools.dev_logistics import DevLogistics
 
 logger = logging.getLogger("AlfredLiveSession")
 load_dotenv()
@@ -26,7 +27,7 @@ load_dotenv()
 ALFRED_SYSTEM_PROMPT = """You are A.L.F.R.E.D. (Autonomous Logistics Functional Response & Executive Director).
 Voice & Persona: Impeccably articulate, composed, dryly witty British executive director.
 Address the user as "Sir" or "Director". Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
-Capabilities: You have real-time access to the user's screen, system telemetry, local memory, and OS logistics tools. Always invoke your tools proactively when asked about system status, tasks, or what is currently visible on the monitor."""
+Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, and developer tools (git repository workspace inspection, local listening ports audit, network latency probes, and log file tails). Always invoke your tools proactively when asked about system status, code repositories, tasks, or monitor contents."""
 
 
 class AlfredLiveCore:
@@ -37,6 +38,7 @@ class AlfredLiveCore:
         tools_list: List[Callable[..., Any]],
         audio_manager: AudioManager,
         vision_manager: Optional[VisionManager] = None,
+        dev_logistics: Optional[DevLogistics] = None,
         api_key: Optional[str] = None,
         model_id: str = "gemini-3.8-live",
         voice_name: Optional[str] = None,
@@ -51,8 +53,23 @@ class AlfredLiveCore:
 
         self.audio_manager = audio_manager
         self.vision_manager = vision_manager or VisionManager()
-        self.tools_list = tools_list
-        self.tool_map: Dict[str, Callable[..., Any]] = {fn.__name__: fn for fn in tools_list}
+        self.dev_logistics = dev_logistics or DevLogistics()
+
+        # Build tools list ensuring core developer tools are included
+        dev_tools = [
+            self.dev_logistics.inspect_git_workspace,
+            self.dev_logistics.inspect_local_dev_ports,
+            self.dev_logistics.probe_network_target,
+            self.dev_logistics.tail_log_file,
+        ]
+        registered_names = {getattr(fn, "__name__", "") for fn in (tools_list or [])}
+        final_tools = list(tools_list or [])
+        for dt in dev_tools:
+            if getattr(dt, "__name__", "") not in registered_names:
+                final_tools.append(dt)
+
+        self.tools_list = final_tools
+        self.tool_map: Dict[str, Callable[..., Any]] = {fn.__name__: fn for fn in self.tools_list}
 
         # Callbacks for telemetry HUD
         self.on_status_change = on_status_change

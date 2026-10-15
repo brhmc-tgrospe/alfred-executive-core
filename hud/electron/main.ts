@@ -69,14 +69,40 @@ function createTray() {
         }
       },
     },
+    { type: "separator" },
     {
-      label: "Toggle Cinema / Dock Mode (Ctrl+Shift+A)",
+      label: "Cycle Layout Mode (Ctrl+Shift+A)",
       click: () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send("toggle-layout-mode");
         }
       },
     },
+    {
+      label: "Mode: Cinema (Centered)",
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("set-layout-mode", "cinema");
+        }
+      },
+    },
+    {
+      label: "Mode: Docked (Corner)",
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("set-layout-mode", "docked");
+        }
+      },
+    },
+    {
+      label: "Mode: Orb-Only (Hide Panels)",
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("set-layout-mode", "orb_only");
+        }
+      },
+    },
+    { type: "separator" },
     {
       label: "Mute / Unmute Mic (Ctrl+Space)",
       click: () => {
