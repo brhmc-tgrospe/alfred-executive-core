@@ -22,3 +22,6 @@ build/
 # Antigravity & OS
 .DS_Store
 Thumbs.db
+
+# Chat & session logs
+chat/
