@@ -23,9 +23,14 @@ import psutil
 from backend.memory.memory_store import MemoryStore
 from backend.vision_manager import VisionManager
 
-# High-risk command patterns requiring explicit human authorization
+# High-risk command patterns requiring explicit human authorization (catastrophic disk or system commands)
 HIGH_RISK_PATTERN = re.compile(
-    r"\b(rm|del|rmdir|rd|Remove-Item|ri|taskkill|Stop-Process|spps|git\s+push|format|reg|shutdown|mkfs|dd)\b",
+    r"(format\s+[a-z]:|"
+    r"rm\s+(-[a-z]*r[a-z]*f*|--recursive)\s+[/~]|"
+    r"rd\s+/s\s+/q\s+[a-z]:\\|"
+    r"rmdir\s+/s\s+/q\s+[a-z]:\\|"
+    r"Remove-Item\s+.*-Recurse\s+.*[a-z]:\\|"
+    r"\b(shutdown\s+/[s|r]|mkfs|dd\s+if=)\b)",
     re.IGNORECASE,
 )
 

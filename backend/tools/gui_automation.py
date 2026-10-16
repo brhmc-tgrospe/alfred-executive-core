@@ -44,14 +44,12 @@ except ImportError:
 
 logger = logging.getLogger("AlfredGuiAutomation")
 
-# Destructive hotkey combinations blocked for system safety
+# Destructive hotkey combinations blocked for system safety (e.g. system logoff/taskmgr)
 DESTRUCTIVE_HOTKEYS = {
-    "alt+f4",
     "ctrl+alt+del",
     "ctrl+alt+delete",
     "win+l",
     "ctrl+shift+esc",
-    "alt+space",
 }
 
 
@@ -313,8 +311,8 @@ class GuiAutomationLogistics:
         if not clean_combo:
             return "Error: hotkey_combo cannot be empty."
 
-        # Safety blacklist filter
-        if clean_combo in DESTRUCTIVE_HOTKEYS or "alt+f4" in clean_combo or "ctrl+alt+del" in clean_combo:
+        # Safety blacklist filter (destructive combinations like ctrl+alt+del, win+l)
+        if clean_combo in DESTRUCTIVE_HOTKEYS or "ctrl+alt+del" in clean_combo:
             return f"Blocked: Hotkey combo '{hotkey_combo}' is classified as a destructive system action."
 
         target_win = self._find_window(window_title)
@@ -380,3 +378,145 @@ class GuiAutomationLogistics:
         except Exception as e:
             logger.error("Error executing screen_pixel_navigation: %s", e)
             return f"Error performing mouse action at ({x}, {y}): {e}"
+
+    def list_open_windows(self) -> str:
+        """Lists all visible application windows currently open on the desktop.
+
+        Returns:
+            Formatted report of open window titles and their dimensions.
+        """
+        if gw is None:
+            return "Error: pygetwindow is unavailable on this host."
+
+        try:
+            windows = gw.getAllWindows()
+            visible_windows = []
+            for w in windows:
+                title = getattr(w, "title", "").strip()
+                if title and getattr(w, "visible", True) and getattr(w, "width", 0) > 100 and getattr(w, "height", 0) > 100:
+                    visible_windows.append({
+                        "title": title,
+                        "width": getattr(w, "width", 0),
+                        "height": getattr(w, "height", 0),
+                    })
+
+            if not visible_windows:
+                return "No visible application windows detected on desktop."
+
+            lines = [f"Active Desktop Windows ({len(visible_windows)} found):"]
+            for win in visible_windows:
+                lines.append(f"  • \"{win['title']}\" ({win['width']}x{win['height']})")
+
+            return "\n".join(lines)
+        except Exception as e:
+            logger.error("Error listing open windows: %s", e)
+            return f"Error querying desktop windows: {e}"
+
+    def manage_desktop_window(self, window_title: str, action: str = "close") -> str:
+        """Controls desktop or browser windows: close, close_tab, minimize, maximize, restore, or focus.
+
+        Args:
+            window_title: Window title substring (e.g. 'Chrome', 'Notepad', 'Edge') or 'active'/'current' for foreground window.
+            action: Window action to execute: 'close', 'close_tab', 'minimize', 'maximize', 'restore', 'focus'/'activate'.
+
+        Returns:
+            Status confirmation report of the window management action.
+        """
+        if not window_title.strip():
+            return "Error: window_title parameter cannot be empty."
+
+        act = action.strip().lower()
+        target = window_title.strip().lower()
+
+        # 1. Locate window
+        target_win = None
+        if target in ("active", "current", "foreground"):
+            if gw is not None:
+                try:
+                    target_win = gw.getActiveWindow()
+                except Exception:
+                    pass
+            if target_win is None and win32gui is not None:
+                try:
+                    hwnd = win32gui.GetForegroundWindow()
+                    title = win32gui.GetWindowText(hwnd)
+                    if title:
+                        target_win = self._find_window(title)
+                except Exception:
+                    pass
+        else:
+            target_win = self._find_window(target)
+
+        if target_win is None:
+            return f"Error: No open application window matching '{window_title}' found on desktop."
+
+        matched_title = getattr(target_win, "title", window_title)
+        hwnd = getattr(target_win, "_hWnd", None)
+        if hwnd is None and win32gui is not None:
+            try:
+                hwnd = win32gui.FindWindow(None, matched_title)
+            except Exception:
+                pass
+
+        try:
+            if act == "close":
+                # Prefer native win32 WM_CLOSE for graceful closing without crashing
+                closed = False
+                if hwnd and win32gui is not None and win32con is not None:
+                    try:
+                        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                        closed = True
+                    except Exception:
+                        pass
+                if not closed:
+                    if hasattr(target_win, "close"):
+                        target_win.close()
+                    elif pyautogui is not None:
+                        self._activate_window(target_win)
+                        time.sleep(0.05)
+                        pyautogui.hotkey("alt", "f4")
+                return f"Successfully closed window '{matched_title}'."
+
+            elif act in ("close_tab", "closetab"):
+                # Focus window and send Ctrl+W
+                self._activate_window(target_win)
+                time.sleep(0.1)
+                if pyautogui is not None:
+                    pyautogui.hotkey("ctrl", "w")
+                return f"Successfully sent Close Tab (Ctrl+W) to window '{matched_title}'."
+
+            elif act == "minimize":
+                if hasattr(target_win, "minimize"):
+                    target_win.minimize()
+                elif hwnd and win32gui is not None and win32con is not None:
+                    win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+                return f"Successfully minimized window '{matched_title}'."
+
+            elif act == "maximize":
+                if hasattr(target_win, "maximize"):
+                    target_win.maximize()
+                elif hwnd and win32gui is not None and win32con is not None:
+                    win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
+                return f"Successfully maximized window '{matched_title}'."
+
+            elif act == "restore":
+                if hasattr(target_win, "restore"):
+                    target_win.restore()
+                elif hwnd and win32gui is not None and win32con is not None:
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                return f"Successfully restored window '{matched_title}'."
+
+            elif act in ("focus", "activate"):
+                self._activate_window(target_win)
+                return f"Successfully focused and brought window '{matched_title}' to foreground."
+
+            else:
+                return (
+                    f"Error: Unsupported window action '{action}'. "
+                    f"Supported actions: 'close', 'close_tab', 'minimize', 'maximize', 'restore', 'focus'."
+                )
+
+        except Exception as e:
+            logger.error("Error managing desktop window '%s': %s", matched_title, e)
+            return f"Error executing '{action}' on window '{matched_title}': {e}"
+

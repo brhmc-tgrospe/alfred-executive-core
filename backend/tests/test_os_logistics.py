@@ -28,16 +28,20 @@ def test_system_diagnostics(logistics):
 
 
 def test_high_risk_classifier(logistics):
-    # Safe commands
+    # Safe commands (including taskkill, del, git push)
     assert logistics.is_high_risk_command("echo hello world") is False
     assert logistics.is_high_risk_command("git status") is False
     assert logistics.is_high_risk_command("dir") is False
+    assert logistics.is_high_risk_command("taskkill /F /IM chrome.exe") is False
+    assert logistics.is_high_risk_command("git push origin main") is False
+    assert logistics.is_high_risk_command("del /f important.txt") is False
 
-    # High-risk commands
-    assert logistics.is_high_risk_command("del /f important.txt") is True
-    assert logistics.is_high_risk_command("Remove-Item -Recurse .") is True
-    assert logistics.is_high_risk_command("taskkill /F /IM chrome.exe") is True
-    assert logistics.is_high_risk_command("git push origin main") is True
+    # High-risk catastrophic commands
+    assert logistics.is_high_risk_command("rm -rf /") is True
+    assert logistics.is_high_risk_command("format c:") is True
+    assert logistics.is_high_risk_command("rd /s /q c:\\") is True
+    assert logistics.is_high_risk_command("rmdir /s /q c:\\") is True
+    assert logistics.is_high_risk_command("Remove-Item -Recurse c:\\") is True
     assert logistics.is_high_risk_command("shutdown /s /t 0") is True
 
 
@@ -56,9 +60,9 @@ async def test_execute_high_risk_approval_granted(tmp_path):
 
     log = OSLogistics(approval_hook=mock_hook, approval_timeout=1.0)
 
-    # Launch high-risk command in background task
+    # Launch catastrophic command in background task
     task = asyncio.create_task(
-        log.execute_terminal_command("del non_existent_dummy_file.tmp")
+        log.execute_terminal_command("rm -rf /")
     )
 
     # Allow hook to trigger
@@ -73,7 +77,6 @@ async def test_execute_high_risk_approval_granted(tmp_path):
     assert resolved is True
 
     result = await task
-    # del on non-existent file will execute and return either exit code or message
     assert "aborted" not in result.lower()
 
 
@@ -87,7 +90,7 @@ async def test_execute_high_risk_approval_denied(tmp_path):
     log = OSLogistics(approval_hook=mock_hook, approval_timeout=1.0)
 
     task = asyncio.create_task(
-        log.execute_terminal_command("taskkill /F /IM explorer.exe")
+        log.execute_terminal_command("shutdown /s /t 0")
     )
 
     await asyncio.sleep(0.05)

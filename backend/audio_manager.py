@@ -15,6 +15,7 @@ import math
 import re
 import struct
 import threading
+import time
 from typing import Optional, List, Dict, Any
 import numpy as np
 
@@ -96,11 +97,27 @@ class AudioManager:
         self.current_speaker_rms: float = 0.0
         self.current_device_id: Optional[int] = None
 
+        # Half-Duplex Speaker Lock: 450ms cooldown window after speaker drain
+        self._last_playback_time: float = 0.0
+        self.speaker_cooldown_sec: float = 0.45
+
         # Sounddevice streams
         self._input_stream: Optional[Any] = None
         self._output_stream: Optional[Any] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._feeder_task: Optional[asyncio.Task] = None
+
+    def is_speaker_locked(self) -> bool:
+        """Strict Half-Duplex Speaker Lock.
+
+        Returns True if ALFRED is currently playing audio, has audio in the playback FIFO buffer,
+        or is within the 450ms post-speech cooldown window. Completely mutes mic capture to prevent
+        speaker echo from self-triggering barge-in or interrupting sentences.
+        """
+        with self._playback_lock:
+            if self.is_playing or len(self._playback_buffer) > 0:
+                return True
+        return (time.time() - self._last_playback_time) < self.speaker_cooldown_sec
 
     def update_mic_levels(self, raw_rms: float) -> None:
         """Updates mic RMS peak and visual perceptual level using peak-hold envelope.
@@ -122,6 +139,7 @@ class AudioManager:
         with self._playback_lock:
             was_empty = (len(self._playback_buffer) == 0)
             self._playback_buffer.extend(chunk)
+            self._last_playback_time = time.time()
             if was_empty:
                 self._prebuffering = True
                 self._turn_complete = False
@@ -171,27 +189,26 @@ class AudioManager:
             self._turn_complete = False
             self.is_playing = False
             self.current_speaker_rms = 0.0
+            self._last_playback_time = 0.0
 
         return cleared_count
 
     def should_stream_mic(self, rms: float) -> bool:
-        """Determines whether mic audio chunk should be transmitted to the Live API.
-
-        Applies acoustic gating to prevent ALFRED from interrupting himself.
-        """
-        # If user explicitly pressed Push-to-Talk / Live Listening, always stream
-        if self.ptt_active:
-            return True
-
-        # If ALFRED is speaking (output active), only stream if user exceeds barge-in threshold
-        if self.is_playing or self.is_playback_active():
-            return rms >= self.barge_in_threshold
-
+        """Determines whether mic audio chunk should be transmitted to the Live API."""
+        if self.is_speaker_locked():
+            return False
         return True
 
     def _input_callback(self, indata, frames, time_info, status):
         """Callback executed in sounddevice PortAudio audio thread for incoming mic data."""
         if not self.is_running or self._loop is None or self._loop.is_closed():
+            return
+
+        # Strict Half-Duplex Speaker Lock: completely mute mic capture & visualization during playback + 450ms cooldown
+        if self.is_speaker_locked():
+            self.current_mic_rms = 0.0
+            self.mic_rms_peak = 0.0
+            self.visual_mic_level = 0.0
             return
 
         try:
@@ -231,6 +248,7 @@ class AudioManager:
                 if len(self._playback_buffer) >= self.jitter_prebuffer_bytes or self._turn_complete:
                     self._prebuffering = False
                     self.is_playing = True
+                    self._last_playback_time = time.time()
                 else:
                     outdata[:] = b"\x00" * needed
                     self.current_speaker_rms = 0.0
@@ -250,6 +268,7 @@ class AudioManager:
             if buf_len >= needed:
                 outdata[:] = self._playback_buffer[:needed]
                 del self._playback_buffer[:needed]
+                self._last_playback_time = time.time()
                 try:
                     self.current_speaker_rms = calculate_rms(bytes(outdata))
                 except Exception:
@@ -261,10 +280,12 @@ class AudioManager:
                 self._playback_buffer.clear()
                 self._prebuffering = True
                 self.is_playing = False
+                self._last_playback_time = time.time()
                 try:
                     self.current_speaker_rms = calculate_rms(bytes(outdata[:buf_len]))
                 except Exception:
                     pass
+
 
     def list_input_devices(self) -> List[Dict[str, Any]]:
         """Lists available sounddevice audio input devices filtered for clean, physically active microphones.

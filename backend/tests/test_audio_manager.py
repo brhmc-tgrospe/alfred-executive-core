@@ -42,23 +42,28 @@ def test_barge_in_clear_playback():
 
 
 def test_acoustic_gate_logic():
+    import time
     mgr = AudioManager(barge_in_rms_threshold=0.20)
 
-    # 1. Idle mode: not playing -> low rms mic audio is allowed
+    # 1. Idle mode: not playing -> mic audio is allowed
     mgr.is_playing = False
     assert mgr.should_stream_mic(rms=0.05) is True
 
-    # 2. Speaking mode: ALFRED is speaking and PTT is inactive -> low rms mic audio is blocked
-    mgr.set_push_to_talk(False)
+    # 2. Speaking mode: ALFRED is speaking -> half-duplex lock blocks mic audio to kill speaker echo
     mgr.is_playing = True
     assert mgr.should_stream_mic(rms=0.05) is False
+    assert mgr.should_stream_mic(rms=0.25) is False
 
-    # 3. Speaking mode with barge-in: loud user voice above threshold -> allowed
-    assert mgr.should_stream_mic(rms=0.25) is True
+    # 3. Cooldown window: after speaking finishes, lock remains active for 450ms
+    mgr.is_playing = False
+    mgr._last_playback_time = time.time()
+    assert mgr.is_speaker_locked() is True
+    assert mgr.should_stream_mic(rms=0.10) is False
 
-    # 4. Push-to-Talk active -> always allowed regardless of speaker status
-    mgr.set_push_to_talk(True)
-    assert mgr.should_stream_mic(rms=0.01) is True
+    # 4. After cooldown window expires: mic audio is allowed again
+    mgr._last_playback_time = time.time() - 1.0
+    assert mgr.is_speaker_locked() is False
+    assert mgr.should_stream_mic(rms=0.10) is True
 
 
 @pytest.mark.asyncio

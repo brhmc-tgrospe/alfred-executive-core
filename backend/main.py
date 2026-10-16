@@ -98,7 +98,7 @@ class AlfredHubCoordinator:
         # Browser Automation Logistics Tools
         self.browser_logistics = BrowserAutomationLogistics()
 
-        # List of tools to register with Gemini Live API (23 total tools)
+        # List of tools to register with Gemini Live API (25 total tools)
         self.tools_list = [
             self.logistics.get_system_diagnostics,
             self.logistics.launch_application_or_url,
@@ -120,6 +120,8 @@ class AlfredHubCoordinator:
             self.gui_logistics.visual_code_edit,
             self.gui_logistics.send_keyboard_shortcut,
             self.gui_logistics.screen_pixel_navigation,
+            self.gui_logistics.manage_desktop_window,
+            self.gui_logistics.list_open_windows,
             self.browser_logistics.browser_navigate_and_parse_dom,
             self.browser_logistics.browser_interact_dom_element,
             self.browser_logistics.browser_scroll_and_inspect,

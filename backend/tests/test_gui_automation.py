@@ -57,10 +57,22 @@ def test_visual_code_edit_empty_path(gui):
 
 def test_send_keyboard_shortcut_destructive_filter(gui):
     """Verifies that destructive system hotkeys are strictly blocked."""
-    for dangerous in ("alt+f4", "ctrl+alt+del", "ctrl+alt+delete", "win+l", "ctrl+shift+esc", "alt+space"):
+    for dangerous in ("ctrl+alt+del", "ctrl+alt+delete", "win+l", "ctrl+shift+esc"):
         result = gui.send_keyboard_shortcut("Notepad", dangerous)
         assert "Blocked:" in result
         assert "destructive system action" in result
+
+
+def test_send_keyboard_shortcut_allowed_alt_f4(gui):
+    """Verifies that alt+f4 is allowed for closing apps on Director request."""
+    mock_win = MagicMock()
+    mock_win.title = "Notepad"
+    with patch.object(gui, "_find_window", return_value=mock_win), \
+         patch.object(gui, "_activate_window", return_value=True), \
+         patch("backend.tools.gui_automation.pyautogui") as mock_pg:
+        result = gui.send_keyboard_shortcut("Notepad", "alt+f4")
+        assert "Successfully sent shortcut 'alt+f4'" in result
+        mock_pg.hotkey.assert_called_with("alt", "f4")
 
 
 def test_send_keyboard_shortcut_window_not_found(gui):
@@ -159,4 +171,76 @@ def test_screen_pixel_navigation_actions(gui):
         # 6. Unsupported action
         res_bad = gui.screen_pixel_navigation(500, 300, action="triple_flip")
         assert "Unsupported mouse action" in res_bad
+
+
+def test_list_open_windows(gui):
+    """Verifies listing active desktop windows with dimensions."""
+    mock_w1 = MagicMock()
+    mock_w1.title = "Google Chrome"
+    mock_w1.visible = True
+    mock_w1.width = 1200
+    mock_w1.height = 800
+
+    mock_w2 = MagicMock()
+    mock_w2.title = ""  # should be excluded
+    mock_w2.visible = True
+    mock_w2.width = 200
+    mock_w2.height = 200
+
+    with patch("backend.tools.gui_automation.gw.getAllWindows", return_value=[mock_w1, mock_w2]):
+        result = gui.list_open_windows()
+        assert "Active Desktop Windows (1 found):" in result
+        assert "Google Chrome" in result
+        assert "1200x800" in result
+
+
+def test_manage_desktop_window_actions(gui):
+    """Verifies manage_desktop_window handles close, close_tab, minimize, maximize, restore, and focus."""
+    # 1. Validation on empty title
+    assert "cannot be empty" in gui.manage_desktop_window("")
+
+    # 2. Window not found
+    assert "No open application window matching" in gui.manage_desktop_window("GhostWindow99")
+
+    # 3. Close action
+    mock_win = MagicMock()
+    mock_win.title = "Google Chrome"
+    mock_win._hWnd = 12345
+    with patch.object(gui, "_find_window", return_value=mock_win), \
+         patch("backend.tools.gui_automation.win32gui") as mock_w32gui:
+        res_close = gui.manage_desktop_window("Google Chrome", action="close")
+        assert "Successfully closed window 'Google Chrome'" in res_close
+        mock_w32gui.PostMessage.assert_called_once()
+
+    # 4. Close Tab action (Ctrl+W)
+    with patch.object(gui, "_find_window", return_value=mock_win), \
+         patch.object(gui, "_activate_window", return_value=True), \
+         patch("backend.tools.gui_automation.pyautogui") as mock_pg:
+        res_tab = gui.manage_desktop_window("Google Chrome", action="close_tab")
+        assert "Successfully sent Close Tab (Ctrl+W)" in res_tab
+        mock_pg.hotkey.assert_called_with("ctrl", "w")
+
+    # 5. Minimize, Maximize, Restore, Focus
+    with patch.object(gui, "_find_window", return_value=mock_win), \
+         patch.object(gui, "_activate_window", return_value=True):
+        res_min = gui.manage_desktop_window("Google Chrome", action="minimize")
+        assert "Successfully minimized" in res_min
+        mock_win.minimize.assert_called_once()
+
+        res_max = gui.manage_desktop_window("Google Chrome", action="maximize")
+        assert "Successfully maximized" in res_max
+        mock_win.maximize.assert_called_once()
+
+        res_res = gui.manage_desktop_window("Google Chrome", action="restore")
+        assert "Successfully restored" in res_res
+        mock_win.restore.assert_called_once()
+
+        res_foc = gui.manage_desktop_window("Google Chrome", action="focus")
+        assert "Successfully focused" in res_foc
+
+    # 6. Unsupported action
+    with patch.object(gui, "_find_window", return_value=mock_win):
+        res_err = gui.manage_desktop_window("Google Chrome", action="dance")
+        assert "Unsupported window action 'dance'" in res_err
+
 

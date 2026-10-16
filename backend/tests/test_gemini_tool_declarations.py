@@ -21,7 +21,7 @@ def test_gemini_tool_declaration_parsing(tmp_path):
     gui = GuiAutomationLogistics()
     browser = BrowserAutomationLogistics(profile_dir=str(tmp_path / "browser_profile"))
 
-    # Exposed tool functions for Gemini Live API (8 OS + 7 Dev + 5 GUI + 3 Browser = 23 tools)
+    # Exposed tool functions for Gemini Live API (8 OS + 7 Dev + 7 GUI + 3 Browser = 25 tools)
     tools_list = [
         logistics.get_system_diagnostics,
         logistics.launch_application_or_url,
@@ -43,6 +43,8 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         gui.visual_code_edit,
         gui.send_keyboard_shortcut,
         gui.screen_pixel_navigation,
+        gui.manage_desktop_window,
+        gui.list_open_windows,
         browser.browser_navigate_and_parse_dom,
         browser.browser_interact_dom_element,
         browser.browser_scroll_and_inspect,
@@ -67,6 +69,6 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         tools=tools_list,
     )
     assert config is not None
-    assert len(config.tools) == 23
+    assert len(config.tools) == 25
 
     mem.close()
