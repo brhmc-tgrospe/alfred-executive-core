@@ -8,7 +8,7 @@ Phase 11 equips A.L.F.R.E.D. with **Visual GUI Automation Hands**, enabling live
    - `write_live_word_document`: Visibly opens Microsoft Word via native COM automation (`win32com.client`), formats styled Heading 1 titles and paragraphs live on screen, with graceful fallback to Notepad/WordPad.
    - `visual_code_edit`: Applies code diffs or scaffolds files on disk and immediately focuses the active IDE (`antigravity --goto` or `code --goto`) at the exact modified line.
    - `send_keyboard_shortcut`: Focuses target windows and sends editor/app shortcuts (`Ctrl+S`, `Ctrl+Z`, `Ctrl+F`) while strictly enforcing safety blacklists against destructive OS commands (`Alt+F4`, `Ctrl+Alt+Del`).
-3. **Updated Persona & Prompt**: Instructed ALFRED in `ALFRED_SYSTEM_PROMPT` to address the Director as **"Director Qaidr"** and proactively utilize his GUI automation tools to type visibly on screen rather than claiming inability to type into desktop applications.
+3. **Updated Persona & Prompt**: Instructed ALFRED in `ALFRED_SYSTEM_PROMPT` to address the Director as **"Director Qadir"** (pronounced "ka-dir") and proactively utilize his GUI automation tools to type visibly on screen rather than claiming inability to type into desktop applications.
 4. **Verification**:
    - **61 / 61 tests passed** (`pytest -v`) in 11.27s.
    - All 18 tools (7 OS + 7 Dev + 4 GUI) verified for Gemini Live API schema parsing in `test_gemini_tool_declarations.py`.
@@ -23,7 +23,7 @@ Phase 11 equips A.L.F.R.E.D. with **Visual GUI Automation Hands**, enabling live
 |---|---|---|
 | `type_into_application` | `app_name: str, text_content: str, clear_existing: bool = False` | Locates target window via `pygetwindow`/`win32gui`, auto-launches `notepad.exe` if requested and not running, activates window, optionally selects all (`Ctrl+A`), and types content line-by-line via clipboard paste with 40ms visual delay. |
 | `write_live_word_document` | `title: str, content: str, save_path: str = ""` | Visibly launches Word (`win32com.client.Dispatch("Word.Application")`, `word.Visible = True`), inserts Heading 1 title, streams body paragraphs, and optionally saves `.docx`. Gracefully falls back to Notepad typing if MS Word is not installed. |
-| `visual_code_edit` | `file_path: str, target_snippet: str, replacement_snippet: str, line_number: int = 1` | Applies code edits on disk, computes modified line index, and opens/focuses the active IDE (`antigravity --goto`, `code --goto`, or `os.startfile`) so Director Qaidr immediately sees the live changes. |
+| `visual_code_edit` | `file_path: str, target_snippet: str, replacement_snippet: str, line_number: int = 1` | Applies code edits on disk, computes modified line index, and opens/focuses the active IDE (`antigravity --goto`, `code --goto`, or `os.startfile`) so Director Qadir immediately sees the live changes. |
 | `send_keyboard_shortcut` | `window_title: str, hotkey_combo: str` | Focuses the application window and sends keystrokes (`pyautogui.hotkey`). Safety filters block `alt+f4`, `ctrl+alt+del`, `win+l`, and `ctrl+shift+esc`. |
 
 ---
@@ -34,8 +34,8 @@ In `backend/live_session.py`:
 ```python
 ALFRED_SYSTEM_PROMPT = """You are A.L.F.R.E.D. (Autonomous Logistics Functional Response & Executive Director).
 Voice & Persona: Impeccably articulate, composed, dryly witty British executive director.
-Address the user as "Sir" or "Director Qaidr". Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
-Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, and full visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut). NEVER tell Director Qaidr that you cannot type into Notepad, Microsoft Word, or the Antigravity IDE—proactively use these visual tools so Director Qaidr can watch you write and edit live on screen. From now on, address Director Qaidr with his title and surname."""
+Address the user as "Sir" or "Director Qadir" (pronounced "ka-dir"). Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
+Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, and full visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut). NEVER tell Director Qadir that you cannot type into Notepad, Microsoft Word, or the Antigravity IDE—proactively use these visual tools so Director Qadir can watch you write and edit live on screen. From now on, address Director Qadir with his title and surname."""
 ```
 
 ---
