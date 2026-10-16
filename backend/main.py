@@ -249,9 +249,10 @@ class AlfredHubCoordinator:
         """Broadcasts telemetry to HUD at 20Hz (every 50ms) for high-framerate visualizer response."""
         while self.is_running:
             try:
-                # Watchdog safeguard: auto-heal stuck speaking status when playback buffer is empty and speaker cooldown elapsed
+                # Watchdog safeguard: auto-heal stuck speaking status when playback buffer is empty, speaker cooldown elapsed, and model turn is closed
                 if (
                     self.live_core.status == "speaking"
+                    and not getattr(self.live_core, "_model_turn_open", False)
                     and not self.audio.is_playback_active()
                     and not self.audio.is_speaker_locked()
                 ):
@@ -337,6 +338,15 @@ class AlfredHubCoordinator:
                 pressed = (state == "down") or message_data.get("pressed", False)
             self.audio.set_push_to_talk(pressed)
             logger.debug("Push-to-Talk set: %s (state: %s)", pressed, state)
+            await self.broadcast_state_packet()
+
+        elif msg_type == "interrupt":
+            logger.info("Manual interrupt requested from HUD.")
+            if hasattr(self.live_core, "interrupt"):
+                self.live_core.interrupt()
+            else:
+                self.audio.clear_playback()
+                self.live_core.set_status("listening")
             await self.broadcast_state_packet()
 
         elif msg_type == "set_input_device":

@@ -14,6 +14,7 @@ import os
 from typing import Any, Callable, Dict, List, Optional
 from dotenv import load_dotenv
 import psutil
+import time
 
 from google import genai
 from google.genai import types
@@ -109,6 +110,8 @@ class AlfredLiveCore:
         self._loop_active: bool = False
         self._session: Any = None
         self._initial_briefing_sent: bool = False
+        self._startup_briefing_completed: asyncio.Event = asyncio.Event()
+        self._model_turn_open: bool = False
         self._thinking_watchdog_task: Optional[asyncio.Task] = None
         self._speaking_watchdog_task: Optional[asyncio.Task] = None
         self._drain_task: Optional[asyncio.Task] = None
@@ -182,6 +185,8 @@ class AlfredLiveCore:
                     "[ALFRED WATCHDOG] Thinking state timed out after 8.0s without Gemini activity for: '%s'",
                     fallback_text,
                 )
+                self._model_turn_open = False
+                self._startup_briefing_completed.set()
                 self.set_status("listening")
                 if self.on_thinking_timeout:
                     try:
@@ -196,6 +201,17 @@ class AlfredLiveCore:
                     )
         except asyncio.CancelledError:
             pass
+
+    def interrupt(self) -> None:
+        """Explicit manual user barge-in."""
+        logger.info("[A.L.F.R.E.D.] Manual user barge-in triggered.")
+        self._model_turn_open = False
+        self._disarm_thinking_watchdog()
+        self._disarm_speaking_watchdog()
+        if self._drain_task and not self._drain_task.done():
+            self._drain_task.cancel()
+        self.audio_manager.clear_playback()
+        self.set_status("listening")
 
     async def send_text_prompt(self, text: str) -> None:
         """Sends a text directive turn to the active Gemini Live session with watchdog protection."""
@@ -268,29 +284,126 @@ class AlfredLiveCore:
         self.set_active_tool(None)
         return result
 
+    async def _send_realtime_audio(self, session: Any, chunk: bytes) -> None:
+        """Sends a 16kHz PCM audio chunk to the Gemini Live session."""
+        if not chunk:
+            return
+        if hasattr(session, "send_realtime_input"):
+            await session.send_realtime_input(
+                audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
+            )
+        else:
+            await session.send(
+                input={"data": chunk, "mime_type": "audio/pcm;rate=16000"},
+                end_of_turn=False,
+            )
+
+    async def _send_audio_stream_end(self, session: Any) -> None:
+        """Signals speech cessation to Gemini Live API with fallback support."""
+        try:
+            if hasattr(session, "send_realtime_input"):
+                try:
+                    await session.send_realtime_input(audio_stream_end=True)
+                    return
+                except TypeError:
+                    pass
+            if hasattr(session, "send"):
+                await session.send(input="", end_of_turn=True)
+        except Exception as e:
+            logger.warning("[ALFRED CORE] Failed to send audio_stream_end: %s", e)
+
     async def _stream_mic_to_alfred(self, session: Any) -> None:
         """Continuously streams 16kHz mono PCM chunks from mic_queue directly to Gemini Live API.
 
-        Relies on Gemini's native server-side VAD for natural turn detection.
-        Streams every chunk while listening whenever not speaker locked and not speaking.
+        Integrates Client-Assisted VAD Turn Closer:
+        1. Waits for startup briefing to complete before streaming any mic audio.
+        2. Gated silence: while user is quiet (visual_level < 0.18 and raw_rms < 0.006),
+           chunks are NOT sent to Gemini Live, keeping the pre-roll buffer fresh.
+        3. Speech onset: flushes pre-roll buffer chunks first, then streams live speech chunks.
+        4. Turn closer: when 1.0s of continuous quiet occurs after speech onset:
+           - Sends 800ms of explicit silence (8x 100ms b"\x00" chunks)
+           - Sends session.send_realtime_input(audio_stream_end=True) (with fallback)
+           - Resets speaking state and transitions status to 'thinking' (armed with 8.0s watchdog).
         """
+        # Wait until startup briefing completes before streaming any microphone input
+        await self._startup_briefing_completed.wait()
+
+        # Drain any stale mic chunks that queued during startup
+        while not self.audio_manager.mic_queue.empty():
+            try:
+                self.audio_manager.mic_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self.audio_manager.clear_preroll()
+
+        user_is_speaking = False
+        quiet_start_time: Optional[float] = None
+        QUIET_THRESHOLD_SEC = 1.0
+        # 100ms of 16kHz 16-bit mono PCM = 1600 samples * 2 bytes = 3200 bytes
+        SILENCE_CHUNK = b"\x00" * 3200
+
         while self.is_running:
             try:
                 chunk = await self.audio_manager.mic_queue.get()
                 if not chunk:
                     continue
 
-                # Only stream mic chunks when speaker is NOT locked and status is NOT speaking
-                if not self.audio_manager.is_speaker_locked() and self.status != "speaking":
-                    if hasattr(session, "send_realtime_input"):
-                        await session.send_realtime_input(
-                            audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
-                        )
+                # Drop mic chunks and reset VAD whenever ALFRED is speaking, speaker locked,
+                # model turn is open, or status is not listening
+                if (
+                    self.status != "listening"
+                    or self.audio_manager.is_speaker_locked()
+                    or getattr(self, "_model_turn_open", False)
+                ):
+                    user_is_speaking = False
+                    quiet_start_time = None
+                    continue
+
+                raw_rms = calculate_rms(chunk)
+                visual_level = getattr(self.audio_manager, "visual_mic_level", 0.0)
+                is_speech_level = (visual_level >= 0.18 or raw_rms >= 0.006)
+
+                if not user_is_speaking:
+                    if is_speech_level:
+                        # Speech onset detected!
+                        user_is_speaking = True
+                        quiet_start_time = None
+                        logger.debug("[Client VAD] Speech onset detected (raw_rms=%.4f, visual=%.2f). Flushing pre-roll buffer.", raw_rms, visual_level)
+                        # Flush pre-roll chunks first so first syllables are intact
+                        preroll_chunks = self.audio_manager.get_preroll_chunks()
+                        for pre in preroll_chunks:
+                            await self._send_realtime_audio(session, pre)
+                        # Send current speech chunk
+                        await self._send_realtime_audio(session, chunk)
                     else:
-                        await session.send(
-                            input={"data": chunk, "mime_type": "audio/pcm;rate=16000"},
-                            end_of_turn=False,
-                        )
+                        # User is quiet: do NOT blast noise to Gemini Live. Keep pre-roll ring buffer updated.
+                        self.audio_manager.add_preroll_chunk(chunk)
+                else:
+                    # User is in active speaking turn
+                    is_quiet = (raw_rms < 0.005 or visual_level < 0.15)
+                    await self._send_realtime_audio(session, chunk)
+
+                    now = time.time()
+                    if not is_quiet:
+                        quiet_start_time = None
+                    else:
+                        if quiet_start_time is None:
+                            quiet_start_time = now
+                        elif (now - quiet_start_time) >= QUIET_THRESHOLD_SEC:
+                            logger.info("[Client VAD] User quiet for %.1fs after speech. Completing turn and triggering ALFRED reasoning...", QUIET_THRESHOLD_SEC)
+                            user_is_speaking = False
+                            quiet_start_time = None
+
+                            # 1. Send 800ms of explicit silence (8 chunks of 100ms silence)
+                            for _ in range(8):
+                                await self._send_realtime_audio(session, SILENCE_CHUNK)
+
+                            # 2. End turn
+                            await self._send_audio_stream_end(session)
+
+                            # 3. Transition to thinking
+                            self.set_status("thinking")
+                            self._arm_thinking_watchdog(fallback_text="Voice Directive")
 
             except asyncio.CancelledError:
                 break
@@ -305,13 +418,18 @@ class AlfredLiveCore:
         self._drain_task = asyncio.create_task(self._wait_drain_and_transition())
 
     async def _wait_drain_and_transition(self) -> None:
-        """Waits for continuous speaker playback buffer to drain to 0 bytes, then resets HUD status."""
+        """Waits for continuous speaker playback buffer to drain to 0 bytes and speaker lock to clear, then resets HUD status."""
         try:
             await self.audio_manager.wait_for_playback_drain()
-            if self.status in ("speaking", "thinking"):
+            while self.audio_manager.is_speaker_locked():
+                await asyncio.sleep(0.05)
+
+            # Only transition to listening if model turn is closed
+            if not self._model_turn_open and self.status in ("speaking", "thinking"):
                 next_status = "listening" if self.audio_manager.ptt_active else "idle"
                 self.set_status(next_status)
-                logger.info("[A.L.F.R.E.D.] Speech playback drained. Status transitioned to: %s", next_status)
+                self._startup_briefing_completed.set()
+                logger.info("[A.L.F.R.E.D.] Speech playback drained and speaker lock cleared. Status transitioned to: %s", next_status)
         except asyncio.CancelledError:
             pass
         finally:
@@ -321,22 +439,29 @@ class AlfredLiveCore:
         """Processes a single Live API server response message (content, interruption, or tool calls)."""
         server_content = getattr(response, "server_content", None)
         if server_content is not None:
-            # 1. Instant Barge-in Interruption Handling
+            # 1. Barge-in Interruption Handling
             if getattr(server_content, "interrupted", False):
-                logger.info("[A.L.F.R.E.D.] User interrupted. Draining speaker playback queue.")
-                self._disarm_thinking_watchdog()
-                self._disarm_speaking_watchdog()
-                if self._drain_task and not self._drain_task.done():
-                    self._drain_task.cancel()
-                self.audio_manager.clear_playback()
-                self.set_status("listening")
-                return
+                # Guard against false barge-in from speaker acoustic leakage:
+                # If ALFRED is actively speaking or model turn is still open, ignore Gemini's auto-interrupted
+                # (reserve playback flush strictly for explicit user manual barge-in)
+                if self.status == "speaking" or self._model_turn_open:
+                    logger.debug("[A.L.F.R.E.D.] Ignoring server_content.interrupted during active model turn/speech.")
+                else:
+                    logger.info("[A.L.F.R.E.D.] User interrupted. Draining speaker playback queue.")
+                    self._disarm_thinking_watchdog()
+                    self._disarm_speaking_watchdog()
+                    if self._drain_task and not self._drain_task.done():
+                        self._drain_task.cancel()
+                    self.audio_manager.clear_playback()
+                    self.set_status("listening")
+                    return
 
             # 2. Output audio chunks & transcripts
             model_turn = getattr(server_content, "model_turn", None)
             if model_turn is not None:
                 for part in model_turn.parts:
                     if part.inline_data and part.inline_data.data:
+                        self._model_turn_open = True
                         self._disarm_thinking_watchdog()
                         self.set_status("speaking")
                         self.audio_manager.feed_speaker_audio(part.inline_data.data)
@@ -347,20 +472,20 @@ class AlfredLiveCore:
                             self.on_transcript(part.text)
 
             # 3. Model Turn Complete
-            is_turn_done = bool(
-                getattr(server_content, "turn_complete", False)
-                or getattr(server_content, "generation_complete", False)
-            )
-            if is_turn_done:
+            # ONLY server_content.turn_complete signals the end of the model turn!
+            # Do NOT treat generation_complete as turn_complete, because audio is still streaming over the wire.
+            if getattr(server_content, "turn_complete", False):
+                self._model_turn_open = False
                 self._disarm_thinking_watchdog()
                 self.audio_manager.mark_turn_complete()
                 # Run buffer drain monitoring non-blockingly
-                if self.audio_manager.is_playback_active():
+                if self.audio_manager.is_playback_active() or self.audio_manager.is_speaker_locked():
                     self._schedule_drain_and_transition()
                 else:
                     self._disarm_speaking_watchdog()
                     next_status = "listening" if self.audio_manager.ptt_active else "idle"
                     self.set_status(next_status)
+                    self._startup_briefing_completed.set()
 
         # 4. Tool Calls Dispatching
         tool_call = getattr(response, "tool_call", None)
@@ -428,11 +553,16 @@ class AlfredLiveCore:
         """Waits 0.5s after connection to ensure receive and mic streams are running, then sends greeting."""
         try:
             await asyncio.sleep(0.5)
-            await self.send_startup_briefing(session)
+            success = await self.send_startup_briefing(session)
+            if not success:
+                self._startup_briefing_completed.set()
+                self.set_status("listening")
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.warning("[ALFRED CORE] Delayed startup briefing encountered error: %s", e)
+            self._startup_briefing_completed.set()
+            self.set_status("listening")
 
     async def start(self) -> None:
         """Starts the Gemini Multimodal Live API bidirectional session."""
@@ -470,7 +600,9 @@ class AlfredLiveCore:
         try:
             async with self.client.aio.live.connect(model=self.model_id, config=config) as session:
                 self._session = session
-                self.set_status("listening")
+                self._startup_briefing_completed.clear()
+                self._model_turn_open = False
+                self.set_status("thinking")
                 connected_msg = f"[LIVE API]: Connected to {self.model_id} (Voice: {self.voice_name}). Standing by, Sir."
                 logger.info(connected_msg)
                 self.update_transcript(connected_msg)
@@ -490,6 +622,8 @@ class AlfredLiveCore:
             if self._drain_task and not self._drain_task.done():
                 self._drain_task.cancel()
             self.is_running = False
+            self._model_turn_open = False
+            self._startup_briefing_completed.set()
             self._session = None
             self.set_status("idle")
 
@@ -519,5 +653,7 @@ class AlfredLiveCore:
         if self._drain_task and not self._drain_task.done():
             self._drain_task.cancel()
         self.is_running = False
+        self._model_turn_open = False
+        self._startup_briefing_completed.set()
         await self.audio_manager.stop()
         self.set_status("idle")

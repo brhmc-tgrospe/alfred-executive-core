@@ -204,10 +204,12 @@ async def test_turn_complete_empty_buffer_transitions_to_listening(core_setup):
 
 
 @pytest.mark.asyncio
-async def test_generation_complete_transitions_to_listening(core_setup):
-    """Regression test: verify generation_complete signals turn completion and transitions to listening."""
+async def test_generation_complete_alone_does_not_transition_to_listening(core_setup):
+    """Regression test: verify generation_complete alone does NOT end the model turn or transition to listening.
+    Only turn_complete ends the model turn."""
     core, logistics, audio, vision = core_setup
     core.set_status("speaking")
+    core._model_turn_open = True
     audio.clear_playback()
 
     class MockServerContent:
@@ -221,7 +223,24 @@ async def test_generation_complete_transitions_to_listening(core_setup):
         tool_call = None
 
     await core.process_server_response(MockResponse())
+    # Should STILL be speaking because turn_complete has not arrived yet!
+    assert core.status == "speaking"
+    assert core._model_turn_open is True
+
+    # When turn_complete = True arrives:
+    class MockTurnCompleteContent:
+        interrupted = False
+        model_turn = None
+        turn_complete = True
+        generation_complete = False
+
+    class MockTurnCompleteResponse:
+        server_content = MockTurnCompleteContent()
+        tool_call = None
+
+    await core.process_server_response(MockTurnCompleteResponse())
     assert core.status == "listening"
+    assert core._model_turn_open is False
 
 
 @pytest.mark.asyncio
@@ -261,8 +280,8 @@ async def test_speaking_watchdog_auto_reverts_to_listening(core_setup):
 
 
 @pytest.mark.asyncio
-async def test_interruption_cancels_drain_and_speaking_watchdogs(core_setup):
-    """Verify user barge-in cancels speaking watchdog and drain task."""
+async def test_manual_interruption_cancels_drain_and_speaking_watchdogs(core_setup):
+    """Verify manual user barge-in cancels speaking watchdog and drain task."""
     core, logistics, audio, vision = core_setup
     core.set_status("speaking")
     core._arm_speaking_watchdog(timeout_sec=5.0)
@@ -270,6 +289,23 @@ async def test_interruption_cancels_drain_and_speaking_watchdogs(core_setup):
 
     assert core._speaking_watchdog_task is not None
     assert core._drain_task is not None
+
+    # Trigger explicit manual barge-in
+    core.interrupt()
+    await asyncio.sleep(0.01)  # Yield so task can process cancellation
+    assert core.status == "listening"
+    assert core._speaking_watchdog_task is None
+    assert core._drain_task.cancelled() or core._drain_task.done()
+    assert core._model_turn_open is False
+
+
+@pytest.mark.asyncio
+async def test_server_interrupted_ignored_while_speaking_or_model_turn_open(core_setup):
+    """Verify acoustic leakage triggering server_content.interrupted during active speech is ignored to prevent self-cutoff."""
+    core, logistics, audio, vision = core_setup
+    core.set_status("speaking")
+    core._model_turn_open = True
+    audio.speaker_queue.put_nowait(b"model_speech_chunk")
 
     class MockServerContent:
         interrupted = True
@@ -282,9 +318,136 @@ async def test_interruption_cancels_drain_and_speaking_watchdogs(core_setup):
         tool_call = None
 
     await core.process_server_response(MockResponse())
-    await asyncio.sleep(0.01)  # Yield so task can process cancellation
+    # Speech must NOT be interrupted or cleared by acoustic leakage
+    assert core.status == "speaking"
+    assert not audio.speaker_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_startup_briefing_mic_gate(core_setup):
+    """Verify mic audio is NOT sent to Live session until startup briefing completes."""
+    core, logistics, audio, vision = core_setup
+    core.is_running = True
+    core._startup_briefing_completed.clear()
+    core.set_status("thinking")
+
+    mock_session = AsyncMock()
+    mock_session.send_realtime_input = AsyncMock()
+    mock_session.send = AsyncMock()
+
+    # Put a mic chunk into the queue
+    audio.mic_queue.put_nowait(b"\x80\x00" * 256)
+
+    # Start _stream_mic_to_alfred in background task
+    stream_task = asyncio.create_task(core._stream_mic_to_alfred(mock_session))
+    await asyncio.sleep(0.05)
+
+    # Because _startup_briefing_completed is not set, no mic chunks should be sent to session!
+    assert mock_session.send_realtime_input.await_count == 0
+    assert mock_session.send.await_count == 0
+
+    # Complete startup briefing
+    core._startup_briefing_completed.set()
+    core.set_status("listening")
+    await asyncio.sleep(0.05)
+
+    # Put speech chunk into queue
+    speech_chunk = b"\x80\x00" * 256
+    audio.visual_mic_level = 0.35
+    audio.mic_queue.put_nowait(speech_chunk)
+    await asyncio.sleep(0.05)
+
+    # Now chunks should be streamed
+    assert (mock_session.send_realtime_input.await_count > 0 or mock_session.send.await_count > 0)
+
+    stream_task.cancel()
+    try:
+        await stream_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_inter_sentence_pause_does_not_leave_speaking(core_setup):
+    """Verify that when _playback_buffer dips to 0 bytes between sentences, _model_turn_open=True prevents premature transition to listening."""
+    core, logistics, audio, vision = core_setup
+    core.set_status("speaking")
+    core._model_turn_open = True
+    audio.clear_playback()  # Buffer reaches 0 bytes between sentences
+
+    # Trigger drain check
+    core._schedule_drain_and_transition()
+    await asyncio.sleep(0.1)
+
+    # Since _model_turn_open is still True, status must remain 'speaking'
+    assert core.status == "speaking"
+
+    # Now turn_complete arrives
+    class MockTurnCompleteContent:
+        interrupted = False
+        model_turn = None
+        turn_complete = True
+        generation_complete = False
+
+    class MockTurnCompleteResponse:
+        server_content = MockTurnCompleteContent()
+        tool_call = None
+
+    await core.process_server_response(MockTurnCompleteResponse())
+    # Advance past speaker lock cooldown
+    audio._last_playback_time -= 1.0
+    core._schedule_drain_and_transition()
+    await asyncio.sleep(0.1)
     assert core.status == "listening"
-    assert core._speaking_watchdog_task is None
-    assert core._drain_task.cancelled() or core._drain_task.done()
+
+
+@pytest.mark.asyncio
+async def test_client_vad_turn_closer(core_setup):
+    """Verify Client-Assisted VAD Turn Closer: 1.0s of silence after speech sends silence + audio_stream_end and transitions to 'thinking'."""
+    core, logistics, audio, vision = core_setup
+    core.is_running = True
+    core._startup_briefing_completed.set()
+    core.set_status("listening")
+
+    mock_session = AsyncMock()
+    mock_session.send_realtime_input = AsyncMock()
+    mock_session.send = AsyncMock()
+
+    stream_task = asyncio.create_task(core._stream_mic_to_alfred(mock_session))
+    await asyncio.sleep(0.02)
+
+    # 1. User speaks: push speech chunk
+    speech_chunk = b"\x80\x00" * 256
+    audio.visual_mic_level = 0.35
+    audio.mic_queue.put_nowait(speech_chunk)
+    await asyncio.sleep(0.05)
+
+    # 2. User stops speaking: send quiet chunks over 1.1s
+    audio.visual_mic_level = 0.05
+    silence_sample = b"\x00\x00" * 256
+    for _ in range(12):
+        audio.mic_queue.put_nowait(silence_sample)
+        await asyncio.sleep(0.1)
+
+    # Should have triggered turn closer and transitioned to 'thinking'
+    assert core.status == "thinking"
+    assert core._thinking_watchdog_task is not None
+
+    # Should have called send_realtime_input with audio_stream_end=True or send with end_of_turn=True
+    sent_end = False
+    for call in mock_session.send_realtime_input.call_args_list:
+        if call.kwargs.get("audio_stream_end") is True:
+            sent_end = True
+    for call in mock_session.send.call_args_list:
+        if call.kwargs.get("end_of_turn") is True:
+            sent_end = True
+    assert sent_end is True
+
+    core._disarm_thinking_watchdog()
+    stream_task.cancel()
+    try:
+        await stream_task
+    except asyncio.CancelledError:
+        pass
 
 

@@ -16,6 +16,7 @@ import re
 import struct
 import threading
 import time
+from collections import deque
 from typing import Optional, List, Dict, Any
 import numpy as np
 
@@ -97,9 +98,12 @@ class AudioManager:
         self.current_speaker_rms: float = 0.0
         self.current_device_id: Optional[int] = None
 
-        # Half-Duplex Speaker Lock: 450ms cooldown window after speaker drain
+        # Half-Duplex Speaker Lock: 800ms cooldown window after speaker drain
         self._last_playback_time: float = 0.0
-        self.speaker_cooldown_sec: float = 0.45
+        self.speaker_cooldown_sec: float = 0.80
+
+        # 300ms Pre-Roll Ring Buffer (last 3 mic chunks at ~100ms or 32ms) to prevent clipping first syllable
+        self._preroll_buffer: deque[bytes] = deque(maxlen=3)
 
         # Sounddevice streams
         self._input_stream: Optional[Any] = None
@@ -107,11 +111,26 @@ class AudioManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._feeder_task: Optional[asyncio.Task] = None
 
+    def add_preroll_chunk(self, chunk: bytes) -> None:
+        """Stores incoming mic chunk in the rolling pre-roll ring buffer."""
+        if chunk:
+            self._preroll_buffer.append(chunk)
+
+    def get_preroll_chunks(self) -> List[bytes]:
+        """Retrieves and clears all chunks currently held in the pre-roll ring buffer."""
+        chunks = list(self._preroll_buffer)
+        self._preroll_buffer.clear()
+        return chunks
+
+    def clear_preroll(self) -> None:
+        """Clears the pre-roll ring buffer."""
+        self._preroll_buffer.clear()
+
     def is_speaker_locked(self) -> bool:
         """Strict Half-Duplex Speaker Lock.
 
         Returns True if ALFRED is currently playing audio, has audio in the playback FIFO buffer,
-        or is within the 450ms post-speech cooldown window. Completely mutes mic capture to prevent
+        or is within the 800ms post-speech cooldown window. Completely mutes mic capture to prevent
         speaker echo from self-triggering barge-in or interrupting sentences.
         """
         with self._playback_lock:
@@ -193,6 +212,7 @@ class AudioManager:
             self.current_speaker_rms = 0.0
             self._last_playback_time = 0.0
 
+        self.clear_preroll()
         return cleared_count
 
     def should_stream_mic(self, rms: float) -> bool:
@@ -226,6 +246,7 @@ class AudioManager:
 
             # Strict Half-Duplex Speaker Lock: ONLY gate pushing audio chunks into mic_queue for Gemini while speaking
             if not self.is_speaker_locked() and self.should_stream_mic(rms):
+                self.add_preroll_chunk(pcm_bytes)
                 self._loop.call_soon_threadsafe(self.mic_queue.put_nowait, pcm_bytes)
         except Exception:
             pass

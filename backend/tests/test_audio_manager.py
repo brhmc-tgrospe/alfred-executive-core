@@ -186,8 +186,8 @@ async def test_speaker_lock_releases_when_output_buffer_empty():
     idle_outdata = bytearray(1024)
     mgr._output_callback(idle_outdata, 512, None, None)
 
-    # 4. Advance time past the 450ms cooldown (500ms)
-    mgr._last_playback_time -= 0.50
+    # 4. Advance time past the 800ms cooldown (900ms)
+    mgr._last_playback_time -= 0.90
 
     # Simulate additional idle _output_callback ticks (regression check: MUST NOT reset _last_playback_time!)
     for _ in range(5):
@@ -216,5 +216,37 @@ async def test_speaker_lock_releases_when_output_buffer_empty():
     assert mgr.visual_mic_level > 0.30
     # But chunk is NOT pushed to Gemini mic_queue while speaker is locked:
     assert mgr.mic_queue.empty()
+
+
+def test_preroll_buffer_retention():
+    """Verify 300ms pre-roll ring buffer (deque maxlen=3) keeps only the last 3 chunks and flushes cleanly."""
+    mgr = AudioManager()
+    assert len(mgr._preroll_buffer) == 0
+
+    chunk1 = b"\x01" * 1600
+    chunk2 = b"\x02" * 1600
+    chunk3 = b"\x03" * 1600
+    chunk4 = b"\x04" * 1600
+
+    mgr.add_preroll_chunk(chunk1)
+    mgr.add_preroll_chunk(chunk2)
+    mgr.add_preroll_chunk(chunk3)
+    assert len(mgr._preroll_buffer) == 3
+    assert list(mgr._preroll_buffer) == [chunk1, chunk2, chunk3]
+
+    # Adding a 4th chunk should drop chunk1 (maxlen=3)
+    mgr.add_preroll_chunk(chunk4)
+    assert len(mgr._preroll_buffer) == 3
+    assert list(mgr._preroll_buffer) == [chunk2, chunk3, chunk4]
+
+    # get_preroll_chunks retrieves and clears
+    retrieved = mgr.get_preroll_chunks()
+    assert retrieved == [chunk2, chunk3, chunk4]
+    assert len(mgr._preroll_buffer) == 0
+
+    # clear_preroll
+    mgr.add_preroll_chunk(chunk1)
+    mgr.clear_preroll()
+    assert len(mgr._preroll_buffer) == 0
 
 
