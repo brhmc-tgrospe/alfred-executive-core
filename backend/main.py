@@ -103,6 +103,9 @@ class AlfredHubCoordinator:
             self.dev_logistics.inspect_local_dev_ports,
             self.dev_logistics.probe_network_target,
             self.dev_logistics.tail_log_file,
+            self.dev_logistics.audit_source_file,
+            self.dev_logistics.inspect_sqlite_database,
+            self.dev_logistics.multi_target_network_sweep,
         ]
 
         # Gemini Live Core
@@ -110,6 +113,7 @@ class AlfredHubCoordinator:
             tools_list=self.tools_list,
             audio_manager=self.audio,
             vision_manager=self.vision,
+            dev_logistics=self.dev_logistics,
             on_status_change=self.on_status_change,
             on_active_tool_change=self.on_active_tool_change,
             on_transcript=self.on_transcript_update,
@@ -148,12 +152,23 @@ class AlfredHubCoordinator:
         self.current_transcript = text
 
     def get_state_payload(self) -> dict:
-        """Assembles the current HUD state JSON packet."""
-        effective_rms = max(self.audio.current_mic_rms, self.simulated_rms)
+        """Assembles the current HUD state JSON packet with perceptual mic level and speaker RMS."""
+        visual_mic = getattr(self.audio, "visual_mic_level", 0.0)
+        speaker_rms = getattr(self.audio, "current_speaker_rms", 0.0)
+
+        # In listening/idle mode, map visual_mic_level to rms_volume so 3D AudioOrb pulses visibly when user speaks
+        if self.live_core.status in ("listening", "idle"):
+            effective_rms = max(visual_mic, self.simulated_rms)
+        elif self.live_core.status == "speaking":
+            effective_rms = max(speaker_rms, self.audio.current_mic_rms, self.simulated_rms)
+        else:
+            effective_rms = max(self.audio.current_mic_rms, self.simulated_rms)
+
         return {
             "type": "state",
             "status": self.live_core.status,
             "rms_volume": effective_rms,
+            "mic_level": visual_mic,
             "cpu": self.cached_cpu,
             "ram": self.cached_ram,
             "ping_ms": self.cached_ping,

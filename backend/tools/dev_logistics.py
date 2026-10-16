@@ -5,6 +5,9 @@ Provides developer-centric inspection tools:
 2. inspect_local_dev_ports: Process inspection on active developer ports via psutil.
 3. probe_network_target: DNS resolution and TCP connection latency measurement.
 4. tail_log_file: Safe inspection of local log files and stack traces.
+5. audit_source_file: Reads source code files, detects declared symbols, and provides previews.
+6. inspect_sqlite_database: Lists schema, tables, column types, and row counts of local databases.
+7. multi_target_network_sweep: Concurrently probes latency and reachability across multiple hosts.
 
 All functions expose strict primitive type hints (str, int, bool) and docstrings
 for clean schema registration with the Gemini Multimodal Live API.
@@ -13,8 +16,11 @@ for clean schema registration with the Gemini Multimodal Live API.
 from __future__ import annotations
 
 import collections
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
+import re
 import socket
+import sqlite3
 import subprocess
 import time
 from typing import List, Set
@@ -225,3 +231,220 @@ class DevLogistics:
             return f"Permission denied reading log file at '{abs_path}'."
         except Exception as e:
             return f"Error reading log file at '{abs_path}': {e}"
+
+    def audit_source_file(self, file_path: str, max_lines: int = 120) -> str:
+        """Reads a source code file (PHP, Vue, TS, Python, JS, etc.), analyzes its structure, and returns key contents.
+
+        Args:
+            file_path: Relative or absolute path to the source file to audit.
+            max_lines: Maximum number of lines of content to return (default 120, capped between 10 and 500).
+
+        Returns:
+            Structural audit including file size, total lines, detected classes/functions/symbols, and source lines.
+        """
+        path_clean = file_path.strip().strip("\"'")
+        if not path_clean:
+            return "Error: file_path cannot be empty."
+
+        abs_path = os.path.abspath(path_clean)
+        if not os.path.exists(abs_path):
+            return f"Error: Source file '{abs_path}' does not exist."
+        if not os.path.isfile(abs_path):
+            return f"Error: Path '{abs_path}' is not a regular file."
+
+        limit = max(10, min(max_lines, 500))
+
+        try:
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+
+            total_lines = len(lines)
+            size_bytes = os.path.getsize(abs_path)
+
+            # Detect key structural declarations across Python, TypeScript/JS, Vue, PHP, Rust, Go
+            symbol_patterns = [
+                re.compile(r"^\s*(async\s+def|def|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)"),
+                re.compile(r"^\s*(export\s+(?:default\s+)?(?:async\s+)?function|function|export\s+class|class|export\s+interface|interface|export\s+type|type)\s+([a-zA-Z_][a-zA-Z0-9_]*)"),
+                re.compile(r"^\s*(?:export\s+)?const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(?:async\s*)?\("),
+            ]
+
+            symbols: List[str] = []
+            for idx, line in enumerate(lines):
+                for pat in symbol_patterns:
+                    m = pat.search(line)
+                    if m:
+                        if len(m.groups()) == 2:
+                            symbols.append(f"Line {idx+1}: {m.group(1)} {m.group(2)}")
+                        else:
+                            symbols.append(f"Line {idx+1}: const {m.group(1)}")
+                        break
+
+            symbols_summary = "\n".join(symbols[:30]) if symbols else "No top-level class/function declarations detected."
+            if len(symbols) > 30:
+                symbols_summary += f"\n... and {len(symbols) - 30} more symbols."
+
+            preview_lines = lines[:limit]
+            preview = "".join(f"{i+1:4d} | {line}" for i, line in enumerate(preview_lines))
+            truncated_notice = f"\n[... truncated {total_lines - limit} additional lines ...]" if total_lines > limit else ""
+
+            return (
+                f"=== Source Code Audit: [{os.path.basename(abs_path)}] ===\n"
+                f"Path: {abs_path}\n"
+                f"Metrics: {total_lines} lines | {size_bytes} bytes\n\n"
+                f"[Declared Symbols ({len(symbols)})]\n"
+                f"{symbols_summary}\n\n"
+                f"[Source Content (First {len(preview_lines)} of {total_lines} lines)]\n"
+                f"{preview}{truncated_notice}"
+            )
+        except Exception as e:
+            return f"Error auditing source file '{abs_path}': {e}"
+
+    def inspect_sqlite_database(self, db_path: str = "backend/memory/alfred_executive.db") -> str:
+        """Lists all tables, row counts, and schema columns in a local SQLite database for backend debugging.
+
+        Args:
+            db_path: Path to the SQLite database file on disk (defaults to 'backend/memory/alfred_executive.db').
+
+        Returns:
+            Formatted report detailing tables, record counts, and column definitions.
+        """
+        path_clean = db_path.strip().strip("\"'")
+        if not path_clean:
+            return "Error: db_path cannot be empty."
+
+        abs_path = os.path.abspath(path_clean)
+        if not os.path.exists(abs_path):
+            return f"Error: SQLite database file not found at '{abs_path}'."
+        if not os.path.isfile(abs_path):
+            return f"Error: Path '{abs_path}' is not a regular file."
+
+        try:
+            conn = sqlite3.connect(f"file:{abs_path}?mode=ro", uri=True)
+            cursor = conn.cursor()
+
+            # Query all user tables
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;")
+            tables = [row[0] for row in cursor.fetchall()]
+
+            if not tables:
+                conn.close()
+                return f"SQLite Database [{os.path.basename(abs_path)}] is valid but contains no user tables."
+
+            report_lines = [
+                f"=== SQLite Database Schema [{os.path.basename(abs_path)}] ===",
+                f"Location: {abs_path}",
+                f"Tables Found: {len(tables)}\n",
+            ]
+
+            for table in tables:
+                # Row count
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM \"{table}\";")
+                    row_count = cursor.fetchone()[0]
+                except Exception:
+                    row_count = "N/A"
+
+                # Columns schema
+                cursor.execute(f"PRAGMA table_info(\"{table}\");")
+                cols = cursor.fetchall()
+                col_defs = [f"{col[1]} ({col[2] or 'ANY'})" + (" [PK]" if col[5] else "") for col in cols]
+                cols_str = ", ".join(col_defs) if col_defs else "No columns"
+
+                report_lines.append(f"• Table '{table}' ({row_count} rows):")
+                report_lines.append(f"  Columns: {cols_str}\n")
+
+            conn.close()
+            return "\n".join(report_lines)
+        except Exception as e:
+            return f"Error inspecting SQLite database at '{abs_path}': {e}"
+
+    def multi_target_network_sweep(
+        self, hosts_csv: str = "8.8.8.8,1.1.1.1,127.0.0.1", port: int = 53
+    ) -> str:
+        """Concurrently probes multiple IP addresses or hosts and reports latency and reachability status.
+
+        Args:
+            hosts_csv: Comma-separated list of hostnames or IP addresses to probe (e.g. '8.8.8.8,1.1.1.1,127.0.0.1').
+            port: Destination TCP port to test connection on each target (default 53).
+
+        Returns:
+            Table of probe results with host, resolved IP, latency in milliseconds, and status.
+        """
+        targets = [h.strip() for h in hosts_csv.split(",") if h.strip()]
+        if not targets:
+            return "Error: hosts_csv must contain at least one valid host target."
+
+        if len(targets) > 16:
+            targets = targets[:16]
+
+        def _probe_single(host: str) -> dict:
+            t0 = time.perf_counter()
+            try:
+                ip = socket.gethostbyname(host)
+            except Exception as e:
+                return {
+                    "host": host,
+                    "ip": "N/A",
+                    "status": f"DNS_FAIL ({e})",
+                    "latency_ms": -1.0,
+                }
+
+            s = None
+            try:
+                s = socket.create_connection((ip, port), timeout=1.5)
+                lat = round((time.perf_counter() - t0) * 1000.0, 1)
+                return {
+                    "host": host,
+                    "ip": ip,
+                    "status": "ONLINE",
+                    "latency_ms": lat,
+                }
+            except socket.timeout:
+                return {
+                    "host": host,
+                    "ip": ip,
+                    "status": "TIMEOUT",
+                    "latency_ms": -1.0,
+                }
+            except ConnectionRefusedError:
+                lat = round((time.perf_counter() - t0) * 1000.0, 1)
+                return {
+                    "host": host,
+                    "ip": ip,
+                    "status": "PORT_CLOSED",
+                    "latency_ms": lat,
+                }
+            except Exception as e:
+                return {
+                    "host": host,
+                    "ip": ip,
+                    "status": f"FAIL ({e})",
+                    "latency_ms": -1.0,
+                }
+            finally:
+                if s:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+
+        results = []
+        with ThreadPoolExecutor(max_workers=min(len(targets), 8)) as executor:
+            future_to_host = {executor.submit(_probe_single, h): h for h in targets}
+            for fut in as_completed(future_to_host):
+                results.append(fut.result())
+
+        # Sort results in original order
+        order = {h: i for i, h in enumerate(targets)}
+        results.sort(key=lambda r: order.get(r["host"], 999))
+
+        lines = [
+            f"=== Multi-Target Network Sweep (Port {port}/TCP) ===",
+            f"Targets Scanned: {len(results)}\n",
+        ]
+        for r in results:
+            lat_str = f"{r['latency_ms']} ms" if r["latency_ms"] >= 0 else "---"
+            status_tag = f"[{r['status']}]"
+            lines.append(f"• {r['host']:<18} -> {r['ip']:<15} | Port {port} | Latency: {lat_str:<9} | {status_tag}")
+
+        return "\n".join(lines)

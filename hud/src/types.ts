@@ -19,6 +19,7 @@ export interface AlfredStatePacket {
   type: "state";
   status: AlfredStatus;
   rms_volume: number;
+  mic_level?: number;
   cpu: number;
   ram: number;
   ping_ms?: number;

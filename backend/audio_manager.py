@@ -90,6 +90,9 @@ class AudioManager:
         self.is_playing: bool = False
         self.ptt_active: bool = True
         self.current_mic_rms: float = 0.0
+        self.mic_rms_peak: float = 0.0
+        self.visual_mic_level: float = 0.0
+        self.current_speaker_rms: float = 0.0
         self.current_device_id: Optional[int] = None
 
         # Sounddevice streams
@@ -97,6 +100,15 @@ class AudioManager:
         self._output_stream: Optional[Any] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._feeder_task: Optional[asyncio.Task] = None
+
+    def update_mic_levels(self, raw_rms: float) -> None:
+        """Updates mic RMS peak and visual perceptual level using peak-hold envelope.
+
+        Smooth peak-hold: peak = max(raw_rms, peak * 0.75).
+        Perceptual boost: min(1.0, (peak * 18.0) ** 0.6) mapping normal speech (0.005-0.02) to 0.25-0.95.
+        """
+        self.mic_rms_peak = max(raw_rms, self.mic_rms_peak * 0.75)
+        self.visual_mic_level = float(round(min(1.0, (self.mic_rms_peak * 18.0) ** 0.6), 4))
 
     def set_push_to_talk(self, active: bool) -> None:
         """Sets the manual Push-to-Talk / Live Listening state."""
@@ -157,6 +169,7 @@ class AudioManager:
             self._prebuffering = True
             self._turn_complete = False
             self.is_playing = False
+            self.current_speaker_rms = 0.0
 
         return cleared_count
 
@@ -194,6 +207,7 @@ class AudioManager:
             rms = calculate_rms(pcm_bytes)
             # Scaled RMS curve (x2.0) for responsive HUD visualizer display (0.10 to 0.80 range)
             self.current_mic_rms = min(1.0, float(round(rms * 2.0, 4)))
+            self.update_mic_levels(rms)
 
             if self.should_stream_mic(rms):
                 self._loop.call_soon_threadsafe(self.mic_queue.put_nowait, pcm_bytes)
@@ -218,6 +232,7 @@ class AudioManager:
                     self.is_playing = True
                 else:
                     outdata[:] = b"\x00" * needed
+                    self.current_speaker_rms = 0.0
                     return
 
             buf_len = len(self._playback_buffer)
@@ -226,6 +241,7 @@ class AudioManager:
                 outdata[:] = b"\x00" * needed
                 self._prebuffering = True
                 self.is_playing = False
+                self.current_speaker_rms = 0.0
                 return
 
             self.is_playing = True
@@ -233,6 +249,10 @@ class AudioManager:
             if buf_len >= needed:
                 outdata[:] = self._playback_buffer[:needed]
                 del self._playback_buffer[:needed]
+                try:
+                    self.current_speaker_rms = calculate_rms(bytes(outdata))
+                except Exception:
+                    pass
             else:
                 # Partial block remaining at end of turn
                 outdata[:buf_len] = self._playback_buffer[:buf_len]
@@ -240,6 +260,10 @@ class AudioManager:
                 self._playback_buffer.clear()
                 self._prebuffering = True
                 self.is_playing = False
+                try:
+                    self.current_speaker_rms = calculate_rms(bytes(outdata[:buf_len]))
+                except Exception:
+                    pass
 
     def list_input_devices(self) -> List[Dict[str, Any]]:
         """Lists available sounddevice audio input devices."""

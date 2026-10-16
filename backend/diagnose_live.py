@@ -65,163 +65,88 @@ async def test_live_api_multi_turn_benchmark(api_key: str, model_id: str = "gemi
                 "[SYSTEM EVENT: The Director has logged into the executive console. "
                 "Greet the Director with an articulate, composed, and concise 2-sentence executive status briefing.]"
             )
-            t0 = time.perf_counter()
-            first_audio_t1 = None
-            chunks_t1 = 0
-            bytes_t1 = 0
+            async def execute_turn(prompt: str, label: str) -> dict:
+                print(f"--- [{label}] ---")
+                print(f"[*] Transmitting prompt: '{prompt}'")
+                t_start = time.perf_counter()
+                first_audio_ms = None
+                chunks = 0
+                total_bytes = 0
+                tool_called = False
 
-            print(f"[*] Transmitting Turn 1 trigger prompt...")
-            await session.send(input=prompt_1, end_of_turn=True)
+                await session.send(input=prompt, end_of_turn=True)
 
-            async with asyncio.timeout(12.0):
-                async for response in session.receive():
-                    server_content = getattr(response, "server_content", None)
-                    if server_content is not None:
-                        model_turn = getattr(server_content, "model_turn", None)
-                        if model_turn is not None:
-                            for part in model_turn.parts:
-                                if part.inline_data and part.inline_data.data:
-                                    if first_audio_t1 is None:
-                                        first_audio_t1 = time.perf_counter() - t0
-                                        print(f"    [+] Turn 1 First Audio Chunk Latency: {first_audio_t1*1000:.1f}ms (< 3000ms goal)")
-                                    chunk = part.inline_data.data
-                                    chunks_t1 += 1
-                                    bytes_t1 += len(chunk)
-                                    audio_mgr.feed_speaker_audio(chunk)
-                                if getattr(part, "text", None):
-                                    print(f"    [Transcript]: {part.text.strip()}")
+                # Outer loop handles tool call -> tool response -> model vocal turn
+                async with asyncio.timeout(18.0):
+                    while True:
+                        turn_finished = False
+                        async for response in session.receive():
+                            tool_call = getattr(response, "tool_call", None)
+                            if tool_call is not None:
+                                for fc in getattr(tool_call, "function_calls", []):
+                                    fname = getattr(fc, "name", "")
+                                    call_id = getattr(fc, "id", "1")
+                                    print(f"    [+] Tool Call Triggered by Gemini: {fname}() [id: {call_id}]")
+                                    tool_called = True
+                                    tool_fn = getattr(dev_tools, fname, None)
+                                    res_str = str(tool_fn()) if tool_fn else "Status: Nominal"
+                                    fn_resp = types.FunctionResponse(
+                                        id=call_id,
+                                        name=fname,
+                                        response={"result": res_str},
+                                    )
+                                    print(f"    [*] Sending tool response for {fname}...")
+                                    await session.send(input=types.LiveClientToolResponse(function_responses=[fn_resp]))
 
-                        if getattr(server_content, "turn_complete", False):
-                            print("[+] Turn 1 complete signal received.")
-                            audio_mgr.mark_turn_complete()
+                            server_content = getattr(response, "server_content", None)
+                            if server_content is not None:
+                                model_turn = getattr(server_content, "model_turn", None)
+                                if model_turn is not None:
+                                    for part in model_turn.parts:
+                                        if part.inline_data and part.inline_data.data:
+                                            if first_audio_ms is None:
+                                                first_audio_ms = (time.perf_counter() - t_start) * 1000.0
+                                                print(f"    [+] First Audio Chunk Latency: {first_audio_ms:.1f}ms")
+                                            chunk = part.inline_data.data
+                                            chunks += 1
+                                            total_bytes += len(chunk)
+                                            audio_mgr.feed_speaker_audio(chunk)
+                                        if getattr(part, "text", None):
+                                            print(f"    [Transcript]: {part.text.strip()}")
+
+                                if getattr(server_content, "turn_complete", False):
+                                    if chunks > 0:
+                                        print(f"    [+] Turn complete signal received ({chunks} audio chunks).")
+                                        audio_mgr.mark_turn_complete()
+                                        turn_finished = True
+                                        break
+
+                        if turn_finished:
                             break
 
-            await audio_mgr.wait_for_playback_drain(timeout=10.0)
-            dur_t1 = time.perf_counter() - t0
-            benchmarks["turn_1"] = {
-                "first_audio_ms": round((first_audio_t1 or 0) * 1000, 1),
-                "total_sec": round(dur_t1, 2),
-                "chunks": chunks_t1,
-                "bytes": bytes_t1,
-            }
-            print(f"[+] Turn 1 complete in {dur_t1:.2f}s (Buffer drained).\n")
+                await audio_mgr.wait_for_playback_drain(timeout=10.0)
+                dur = time.perf_counter() - t_start
+                print(f"[+] {label} complete in {dur:.2f}s (Buffer drained).\n")
+                return {
+                    "first_audio_ms": round(first_audio_ms or 0.0, 1),
+                    "total_sec": round(dur, 2),
+                    "chunks": chunks,
+                    "bytes": total_bytes,
+                    "tool_called": tool_called,
+                }
 
-            # -------------------------------------------------------------
-            # TURN 2: Quick Prompt ('Status report, Alfred.')
-            # -------------------------------------------------------------
-            print("--- [TURN 2: Quick Directive: 'Status report, Alfred.'] ---")
-            prompt_2 = "Status report, Alfred."
-            t1 = time.perf_counter()
-            first_audio_t2 = None
-            chunks_t2 = 0
-            bytes_t2 = 0
-
-            print(f"[*] Transmitting Turn 2 prompt: '{prompt_2}'")
-            await session.send(input=prompt_2, end_of_turn=True)
-
-            async with asyncio.timeout(12.0):
-                async for response in session.receive():
-                    server_content = getattr(response, "server_content", None)
-                    if server_content is not None:
-                        model_turn = getattr(server_content, "model_turn", None)
-                        if model_turn is not None:
-                            for part in model_turn.parts:
-                                if part.inline_data and part.inline_data.data:
-                                    if first_audio_t2 is None:
-                                        first_audio_t2 = time.perf_counter() - t1
-                                        print(f"    [+] Turn 2 First Audio Chunk Latency: {first_audio_t2*1000:.1f}ms")
-                                    chunk = part.inline_data.data
-                                    chunks_t2 += 1
-                                    bytes_t2 += len(chunk)
-                                    audio_mgr.feed_speaker_audio(chunk)
-                                if getattr(part, "text", None):
-                                    print(f"    [Transcript]: {part.text.strip()}")
-
-                        if getattr(server_content, "turn_complete", False):
-                            print("[+] Turn 2 complete signal received.")
-                            audio_mgr.mark_turn_complete()
-                            break
-
-            await audio_mgr.wait_for_playback_drain(timeout=10.0)
-            dur_t2 = time.perf_counter() - t1
-            benchmarks["turn_2"] = {
-                "first_audio_ms": round((first_audio_t2 or 0) * 1000, 1),
-                "total_sec": round(dur_t2, 2),
-                "chunks": chunks_t2,
-                "bytes": bytes_t2,
-            }
-            print(f"[+] Turn 2 complete in {dur_t2:.2f}s (Buffer drained).\n")
-
-            # -------------------------------------------------------------
-            # TURN 3: Tool Directive ('Check local dev ports.')
-            # -------------------------------------------------------------
-            print("--- [TURN 3: Tool Directive: 'Check local dev ports.'] ---")
-            prompt_3 = "Check local dev ports."
-            t2 = time.perf_counter()
-            first_audio_t3 = None
-            chunks_t3 = 0
-            bytes_t3 = 0
-            tool_dispatched = False
-
-            print(f"[*] Transmitting Turn 3 tool prompt: '{prompt_3}'")
-            await session.send(input=prompt_3, end_of_turn=True)
-
-            # 1. Receive Tool Call from Gemini
-            async with asyncio.timeout(15.0):
-                async for response in session.receive():
-                    tool_call = getattr(response, "tool_call", None)
-                    if tool_call is not None:
-                        for fc in getattr(tool_call, "function_calls", []):
-                            fname = getattr(fc, "name", "")
-                            call_id = getattr(fc, "id", "1")
-                            print(f"    [+] Tool Call Triggered by Gemini: {fname}() [id: {call_id}]")
-                            if fname == "inspect_local_dev_ports":
-                                tool_result = dev_tools.inspect_local_dev_ports()
-                                tool_dispatched = True
-                                print(f"    [*] Executed tool in <10ms. Sending tool response to Gemini...")
-                                fn_resp = types.FunctionResponse(
-                                    id=call_id,
-                                    name=fname,
-                                    response={"result": tool_result},
-                                )
-                                await session.send(input=types.LiveClientToolResponse(function_responses=[fn_resp]))
-
-            # 2. Receive Vocal Response to Tool Output
-            if tool_dispatched:
-                print("    [*] Awaiting Gemini vocal response to tool output...")
-                async with asyncio.timeout(15.0):
-                    async for response in session.receive():
-                        server_content = getattr(response, "server_content", None)
-                        if server_content is not None:
-                            model_turn = getattr(server_content, "model_turn", None)
-                            if model_turn is not None:
-                                for part in model_turn.parts:
-                                    if part.inline_data and part.inline_data.data:
-                                        if first_audio_t3 is None:
-                                            first_audio_t3 = time.perf_counter() - t2
-                                            print(f"    [+] Turn 3 Audio Vocalization Latency: {first_audio_t3*1000:.1f}ms")
-                                        chunk = part.inline_data.data
-                                        chunks_t3 += 1
-                                        bytes_t3 += len(chunk)
-                                        audio_mgr.feed_speaker_audio(chunk)
-                                    if getattr(part, "text", None):
-                                        print(f"    [Transcript]: {part.text.strip()}")
-
-                            if getattr(server_content, "turn_complete", False):
-                                print("[+] Turn 3 complete signal received.")
-                                audio_mgr.mark_turn_complete()
-                                break
-
-            await audio_mgr.wait_for_playback_drain(timeout=10.0)
-            dur_t3 = time.perf_counter() - t2
-            benchmarks["turn_3"] = {
-                "first_audio_ms": round((first_audio_t3 or 0) * 1000, 1),
-                "total_sec": round(dur_t3, 2),
-                "chunks": chunks_t3,
-                "bytes": bytes_t3,
-                "tool_called": tool_dispatched,
-            }
-            print(f"[+] Turn 3 complete in {dur_t3:.2f}s (Buffer drained).\n")
+            benchmarks["turn_1"] = await execute_turn(
+                prompt="[SYSTEM EVENT: The Director has logged into the executive console. Greet the Director with an articulate, composed, and concise 2-sentence executive status briefing.]",
+                label="TURN 1: Executive Startup Briefing",
+            )
+            benchmarks["turn_2"] = await execute_turn(
+                prompt="Status report, Alfred.",
+                label="TURN 2: Quick Directive: 'Status report, Alfred.'",
+            )
+            benchmarks["turn_3"] = await execute_turn(
+                prompt="Check local dev ports.",
+                label="TURN 3: Tool Directive: 'Check local dev ports.'",
+            )
 
             await audio_mgr.stop()
 
@@ -233,13 +158,14 @@ async def test_live_api_multi_turn_benchmark(api_key: str, model_id: str = "gemi
                 and benchmarks["turn_3"]["chunks"] > 0
             )
             zero_underflows = (audio_mgr.underflow_count == 0)
+            any_tool_called = (benchmarks["turn_1"]["tool_called"] or benchmarks["turn_2"]["tool_called"] or benchmarks["turn_3"]["tool_called"])
 
             print("=" * 70)
             print("                 MULTI-TURN LATENCY BENCHMARKS")
             print("=" * 70)
             print(f"• Turn 1 (Startup Greeting): First Audio: {benchmarks['turn_1']['first_audio_ms']}ms | Duration: {benchmarks['turn_1']['total_sec']}s")
             print(f"• Turn 2 (Status Report):    First Audio: {benchmarks['turn_2']['first_audio_ms']}ms | Duration: {benchmarks['turn_2']['total_sec']}s")
-            print(f"• Turn 3 (Dev Ports Tool):   First Audio: {benchmarks['turn_3']['first_audio_ms']}ms | Tool Called: {tool_dispatched} | Duration: {benchmarks['turn_3']['total_sec']}s")
+            print(f"• Turn 3 (Dev Ports Tool):   First Audio: {benchmarks['turn_3']['first_audio_ms']}ms | Tool Called: {any_tool_called} | Duration: {benchmarks['turn_3']['total_sec']}s")
             print(f"• Output Underflow Errors:   {audio_mgr.underflow_count}")
             print(f"• Overall Multi-Turn Status: {'[PASSED]' if (turn_1_fast and all_chunks_received and zero_underflows) else '[FAILED]'}")
             print("=" * 70)

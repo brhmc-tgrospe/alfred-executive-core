@@ -82,3 +82,24 @@ async def test_input_callback_thread_safety():
     expected_chunk = b"\x50\x00" * 256
     assert queued == expected_chunk
     assert mgr.current_mic_rms > 0.0
+
+
+def test_mic_peak_hold_and_visual_level():
+    """Verify that a raw mic RMS of 0.010 produces visual_mic_level > 0.30 and holds across peak decay."""
+    mgr = AudioManager()
+    assert mgr.mic_rms_peak == 0.0
+    assert mgr.visual_mic_level == 0.0
+
+    # Simulate raw mic RMS of 0.010 (typical speech level)
+    mgr.update_mic_levels(0.010)
+    assert mgr.mic_rms_peak == 0.010
+    assert mgr.visual_mic_level > 0.30
+    assert mgr.visual_mic_level < 0.60
+
+    # Next frame with silence: raw_rms = 0.0 -> peak decays by factor of 0.75
+    prev_visual = mgr.visual_mic_level
+    mgr.update_mic_levels(0.0)
+    assert pytest.approx(mgr.mic_rms_peak, 0.0001) == 0.0075
+    # Holds across decay: still > 0.25
+    assert mgr.visual_mic_level > 0.25
+    assert mgr.visual_mic_level < prev_visual

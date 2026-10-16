@@ -360,6 +360,7 @@ export function App() {
             pingMs={state.ping_ms}
             fps={fps}
             rmsVolume={state.rms_volume}
+            micLevel={state.mic_level}
             inputDevices={state.input_devices}
             currentDeviceId={state.current_device_id}
             onSwitchInputDevice={switchInputDevice}

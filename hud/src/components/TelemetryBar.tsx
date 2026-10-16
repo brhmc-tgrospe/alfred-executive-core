@@ -23,6 +23,7 @@ interface TelemetryBarProps {
   pingMs?: number;
   fps?: number;
   rmsVolume?: number;
+  micLevel?: number;
   inputDevices?: AudioDevice[];
   currentDeviceId?: number | null;
   onSwitchInputDevice?: (deviceId: number) => void;
@@ -82,6 +83,7 @@ export function TelemetryBar({
   pingMs = -1,
   fps = 60,
   rmsVolume = 0.0,
+  micLevel,
   inputDevices = [],
   currentDeviceId = null,
   onSwitchInputDevice,
@@ -100,6 +102,8 @@ export function TelemetryBar({
   onMouseLeave,
 }: TelemetryBarProps) {
   const badge = STATUS_BADGES[status] || STATUS_BADGES.idle;
+  const currentMicLevel = micLevel ?? rmsVolume;
+  const micPercent = Math.min(100, Math.max(0, Math.round(currentMicLevel * 100)));
 
   return (
     <header
@@ -272,22 +276,33 @@ export function TelemetryBar({
           {/* Live Mic Input Level Meter */}
           {micActive && (
             <div
-              className="flex items-center gap-1 px-1.5 py-1 rounded-lg bg-slate-900/80 border border-slate-700/60 text-slate-300"
-              title={`Microphone Input Level: ${(rmsVolume * 100).toFixed(0)}%`}
+              className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-900/80 border border-slate-700/60 text-slate-300"
+              title={`Microphone Input Level: ${micPercent}%`}
             >
               <span className="font-mono text-[9px] text-slate-400">LVL</span>
-              <div className="w-10 h-1 bg-slate-800 rounded-full overflow-hidden flex items-center p-0.5">
+              <div className="w-20 h-2.5 bg-slate-800/90 rounded-full overflow-hidden flex items-center p-0.5 border border-slate-700/50">
                 <div
                   className={`h-full rounded-full transition-all duration-75 ${
-                    rmsVolume > 0.6
-                      ? "bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.6)]"
-                      : rmsVolume > 0.04
-                      ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]"
+                    currentMicLevel > 0.75
+                      ? "bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)]"
+                      : currentMicLevel > 0.15
+                      ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]"
                       : "bg-cyan-500/30"
                   }`}
-                  style={{ width: `${Math.min(100, Math.max(8, rmsVolume * 100))}%` }}
+                  style={{ width: `${Math.max(4, micPercent)}%` }}
                 />
               </div>
+              <span
+                className={`font-mono text-[9px] font-bold min-w-[24px] text-right ${
+                  currentMicLevel > 0.75
+                    ? "text-amber-400"
+                    : currentMicLevel > 0.15
+                    ? "text-emerald-400"
+                    : "text-slate-500"
+                }`}
+              >
+                {micPercent}%
+              </span>
             </div>
           )}
 

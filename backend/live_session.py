@@ -28,7 +28,7 @@ load_dotenv()
 ALFRED_SYSTEM_PROMPT = """You are A.L.F.R.E.D. (Autonomous Logistics Functional Response & Executive Director).
 Voice & Persona: Impeccably articulate, composed, dryly witty British executive director.
 Address the user as "Sir" or "Director". Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
-Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, and developer tools (git repository workspace inspection, local listening ports audit, network latency probes, and log file tails). Always invoke your tools proactively when asked about system status, code repositories, tasks, or monitor contents."""
+Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, and developer tools (git repository workspace inspection, local listening ports audit, network latency probes, log file tails, source code file auditing, SQLite database schema inspection, and multi-target network sweeps). Always invoke your tools proactively when asked about system status, code repositories, tasks, or monitor contents."""
 
 
 class AlfredLiveCore:
@@ -63,6 +63,9 @@ class AlfredLiveCore:
             self.dev_logistics.inspect_local_dev_ports,
             self.dev_logistics.probe_network_target,
             self.dev_logistics.tail_log_file,
+            self.dev_logistics.audit_source_file,
+            self.dev_logistics.inspect_sqlite_database,
+            self.dev_logistics.multi_target_network_sweep,
         ]
         registered_names = {getattr(fn, "__name__", "") for fn in (tools_list or [])}
         final_tools = list(tools_list or [])
