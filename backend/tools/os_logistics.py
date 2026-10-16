@@ -20,7 +20,7 @@ import webbrowser
 from typing import Awaitable, Callable, Optional
 import psutil
 
-from backend.memory.memory_store import MemoryStore
+from backend.memory.memory_store import MemoryStore, get_utc8_now_str
 from backend.vision_manager import VisionManager
 
 # High-risk command patterns requiring explicit human authorization (catastrophic disk or system commands)
@@ -100,6 +100,7 @@ class OSLogistics:
 
             diagnostics = [
                 "System Diagnostics Telemetry:",
+                f"• System Time: {get_utc8_now_str()} (Philippine Standard Time, UTC+8)",
                 f"• CPU Utilization: {cpu:.1f}%",
                 f"• Memory Usage: {mem.percent:.1f}% ({mem.used // (1024**2)}MB / {mem.total // (1024**2)}MB)",
                 f"• Disk Space: {disk.percent:.1f}% used ({disk.free // (1024**3)}GB free)",
@@ -110,6 +111,18 @@ class OSLogistics:
             return "\n".join(diagnostics)
         except Exception as e:
             return f"Failed to retrieve system diagnostics: {e}"
+
+    def inspect_learned_habits_and_growth(self, action: str = "summary", habit_note: str = "") -> str:
+        """Inspects ALFRED's learned habits, Director preferences, and continuous adaptation metrics.
+
+        Args:
+            action: Action to perform: 'summary', 'preferences', 'habits', or 'log_note'.
+            habit_note: Custom observation or habit pattern to log when action is 'log_note'.
+
+        Returns:
+            Formatted diagnostic report of ALFRED's learning and adaptation growth.
+        """
+        return self.memory.inspect_learned_habits_and_growth(action=action, habit_note=habit_note)
 
     def launch_application_or_url(self, target: str) -> str:
         """Opens a web URL in the default browser or launches a local desktop application safely.

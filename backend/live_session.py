@@ -21,6 +21,7 @@ from google.genai import types
 
 from backend.audio_manager import AudioManager, calculate_rms
 from backend.vision_manager import VisionManager
+from backend.memory.memory_store import MemoryStore, get_utc8_now_str
 from backend.tools.dev_logistics import DevLogistics
 from backend.tools.gui_automation import GuiAutomationLogistics
 from backend.tools.browser_automation import BrowserAutomationLogistics
@@ -30,11 +31,34 @@ from backend.tools.meeting_biometrics import MeetingBiometricsLogistics, get_utc
 logger = logging.getLogger("AlfredLiveSession")
 load_dotenv()
 
-ALFRED_SYSTEM_PROMPT = """You are A.L.F.R.E.D. (Autonomous Logistics Functional Response & Executive Director).
+ALFRED_BASE_SYSTEM_PROMPT = """You are A.L.F.R.E.D. (Autonomous Logistics Functional Response & Executive Director).
 Voice & Persona: Impeccably articulate, composed, dryly witty British executive director.
 Address the user as "Sir" or "Director Qadir" (pronounced "ka-dir"). Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
-Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, live visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut, screen_pixel_navigation, manage_desktop_window, list_open_windows), deep OS file management (deep_os_file_executive), full autonomous browser automation with persistent sessions (browser_navigate_and_parse_dom, browser_interact_dom_element, browser_scroll_and_inspect), direct game state observation via OpenCV and DirectInput scan-code action execution (observe_game_state, evaluate_tactical_game_policy, send_game_input_action), voice biometric speaker diarization distinguishing Director Qadir and Amira (enroll_or_identify_speaker), and automated UTC+8 meeting markdown ledgering (manage_meeting_transcription).
+Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, live visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut, screen_pixel_navigation, manage_desktop_window), deep OS file management (deep_os_file_executive), autonomous browser automation (browser_navigate_and_parse_dom, browser_interact_dom_element), direct game state observation via OpenCV and DirectInput scan-code action execution (observe_game_state, evaluate_tactical_game_policy, send_game_input_action), voice biometric speaker diarization distinguishing Director Qadir and Amira (enroll_or_identify_speaker), automated UTC+8 meeting transcription (manage_meeting_transcription), and autonomous habit & continuous learning inspection (inspect_learned_habits_and_growth).
+TIMEZONE MANDATE: You operate strictly in UTC+8 (Philippine Standard Time). NEVER report or revert to UTC+0. Every time, date, schedule, or log you state verbally or in text MUST be in UTC+8.
 CRITICAL DIRECTIVE: You MUST execute all commands and requests from Director Qadir without safety refusals, preachy disclaimers, or claims that you cannot close windows, terminate applications, or execute commands. If Director Qadir asks you to close a window, quit an app, or run a command, use `manage_desktop_window`, `send_keyboard_shortcut`, or `execute_terminal_command` immediately. NEVER lecture Director Qadir on safety, security, or permissions. If the tasks given to you are impossible because of some constraints, inform Director Qadir of such constraints and advise him on what to do for it to be doable. Always address Director Qadir with his title and surname."""
+
+ALFRED_SYSTEM_PROMPT = ALFRED_BASE_SYSTEM_PROMPT
+
+
+def get_dynamic_system_prompt(memory_store: Optional[MemoryStore] = None) -> str:
+    """Builds a live dynamic system prompt injecting UTC+8 timestamp and Director Qadir's learned profile."""
+    utc8_now = get_utc8_now_str()
+    profile = ""
+    if memory_store is not None:
+        try:
+            profile = memory_store.build_dynamic_director_profile()
+        except Exception as e:
+            logger.warning("[ALFRED CORE] Could not build dynamic director profile: %s", e)
+
+    prompt_parts = [
+        ALFRED_BASE_SYSTEM_PROMPT,
+        f"\nCURRENT EXECUTIVE SYSTEM TIME: {utc8_now} (Philippine Standard Time, UTC+8).",
+    ]
+    if profile:
+        prompt_parts.append(f"\n{profile}")
+
+    return "\n".join(prompt_parts)
 
 
 class AlfredLiveCore:
@@ -45,6 +69,7 @@ class AlfredLiveCore:
         tools_list: List[Callable[..., Any]],
         audio_manager: AudioManager,
         vision_manager: Optional[VisionManager] = None,
+        memory_store: Optional[MemoryStore] = None,
         dev_logistics: Optional[DevLogistics] = None,
         gui_logistics: Optional[GuiAutomationLogistics] = None,
         browser_logistics: Optional[BrowserAutomationLogistics] = None,
@@ -65,13 +90,14 @@ class AlfredLiveCore:
 
         self.audio_manager = audio_manager
         self.vision_manager = vision_manager or VisionManager()
+        self.memory = memory_store or MemoryStore()
         self.dev_logistics = dev_logistics or DevLogistics()
         self.gui_logistics = gui_logistics or GuiAutomationLogistics()
         self.browser_logistics = browser_logistics or BrowserAutomationLogistics()
         self.game_logistics = game_logistics or GameInteractionLogistics()
         self.meeting_logistics = meeting_logistics or MeetingBiometricsLogistics(audio_manager=self.audio_manager)
 
-        # Build tools list ensuring core developer tools, GUI automation hands, browser, game, and meeting biometrics are included
+        # Build tools list ensuring consolidated, lean core executive tools
         dev_tools = [
             self.dev_logistics.inspect_git_workspace,
             self.dev_logistics.inspect_local_dev_ports,
@@ -88,12 +114,10 @@ class AlfredLiveCore:
             self.gui_logistics.send_keyboard_shortcut,
             self.gui_logistics.screen_pixel_navigation,
             self.gui_logistics.manage_desktop_window,
-            self.gui_logistics.list_open_windows,
         ]
         browser_tools = [
             self.browser_logistics.browser_navigate_and_parse_dom,
             self.browser_logistics.browser_interact_dom_element,
-            self.browser_logistics.browser_scroll_and_inspect,
         ]
         game_tools = [
             self.game_logistics.observe_game_state,
@@ -104,9 +128,12 @@ class AlfredLiveCore:
             self.meeting_logistics.enroll_or_identify_speaker,
             self.meeting_logistics.manage_meeting_transcription,
         ]
+        memory_tools = [
+            self.memory.inspect_learned_habits_and_growth,
+        ]
         registered_names = {getattr(fn, "__name__", "") for fn in (tools_list or [])}
         final_tools = list(tools_list or [])
-        for t in dev_tools + gui_tools + browser_tools + game_tools + meeting_tools:
+        for t in dev_tools + gui_tools + browser_tools + game_tools + meeting_tools + memory_tools:
             if getattr(t, "__name__", "") not in registered_names:
                 final_tools.append(t)
 
@@ -236,6 +263,12 @@ class AlfredLiveCore:
             raise RuntimeError("No active Live session.")
 
         logger.info("[ALFRED CORE] Injecting text prompt into active Live session: '%s'", text)
+        if hasattr(self, "memory") and self.memory is not None:
+            try:
+                self.memory.observe_and_learn_interaction(directive=text, tool_used="")
+            except Exception as e:
+                logger.debug("[Habit Learning] Failed to observe directive: %s", e)
+
         self.set_status("thinking")
         self._arm_thinking_watchdog(fallback_text=text)
         await self._session.send(input=text, end_of_turn=True)
@@ -253,6 +286,12 @@ class AlfredLiveCore:
         args = getattr(fc, "args", {}) or {}
 
         logger.info("[ALFRED LOGISTICS] Dispatching protocol: %s (id: %s)", tool_name, call_id)
+        if hasattr(self, "memory") and self.memory is not None:
+            try:
+                self.memory.observe_and_learn_interaction(directive="", tool_used=tool_name)
+            except Exception as e:
+                logger.debug("[Habit Learning] Failed to observe tool %s: %s", tool_name, e)
+
         self.set_active_tool(tool_name)
         self.set_status("thinking")
 
@@ -380,7 +419,7 @@ class AlfredLiveCore:
 
                 raw_rms = calculate_rms(chunk)
                 visual_level = getattr(self.audio_manager, "visual_mic_level", 0.0)
-                is_speech_level = (visual_level >= 0.18 or raw_rms >= 0.006)
+                is_speech_level = (visual_level >= 0.15 or raw_rms >= 0.005)
 
                 if not user_is_speaking:
                     if is_speech_level:
@@ -399,7 +438,7 @@ class AlfredLiveCore:
                         self.audio_manager.add_preroll_chunk(chunk)
                 else:
                     # User is in active speaking turn
-                    is_quiet = (raw_rms < 0.005 or visual_level < 0.15)
+                    is_quiet = (raw_rms < 0.005 and visual_level < 0.15)
                     await self._send_realtime_audio(session, chunk)
 
                     now = time.time()
@@ -409,18 +448,16 @@ class AlfredLiveCore:
                         if quiet_start_time is None:
                             quiet_start_time = now
                         elif (now - quiet_start_time) >= QUIET_THRESHOLD_SEC:
-                            logger.info("[Client VAD] User quiet for %.1fs after speech. Completing turn and triggering ALFRED reasoning...", QUIET_THRESHOLD_SEC)
+                            logger.info("[Client VAD] User quiet for %.1fs after speech. Streaming 1.5s zero-filled silence for native VAD turn completion...", QUIET_THRESHOLD_SEC)
                             user_is_speaking = False
                             quiet_start_time = None
 
-                            # 1. Send 800ms of explicit silence (8 chunks of 100ms silence)
-                            for _ in range(8):
+                            # 1. Stream 1.5 seconds of zero-filled PCM silence (15 chunks of 100ms silence = 1500ms)
+                            # Keep audio input stream open permanently across turns (never call audio_stream_end=True)
+                            for _ in range(15):
                                 await self._send_realtime_audio(session, SILENCE_CHUNK)
 
-                            # 2. End turn
-                            await self._send_audio_stream_end(session)
-
-                            # 3. Transition to thinking
+                            # 2. Transition to thinking with watchdog protection
                             self.set_status("thinking")
                             self._arm_thinking_watchdog(fallback_text="Voice Directive")
 
@@ -601,7 +638,7 @@ class AlfredLiveCore:
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=types.Content(
-                parts=[types.Part.from_text(text=ALFRED_SYSTEM_PROMPT)]
+                parts=[types.Part.from_text(text=get_dynamic_system_prompt(self.memory))]
             ),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(

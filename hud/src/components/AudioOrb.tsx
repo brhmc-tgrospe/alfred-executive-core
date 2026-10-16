@@ -59,7 +59,7 @@ export function AudioOrb({ rmsVolume, status, size = 280 }: AudioOrbProps) {
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
     renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     rendererRef.current = renderer;
     container.appendChild(renderer.domElement);
 
@@ -155,17 +155,22 @@ export function AudioOrb({ rmsVolume, status, size = 280 }: AudioOrbProps) {
     const particles = new THREE.Points(particleGeo, particleMat);
     scene.add(particles);
 
-    // 5. 60 FPS Animation Loop
+    // 5. Frame-rate Independent Animation Loop
     let animId: number;
     let smoothRms = 0;
+    const clock = new THREE.Clock();
     const targetColor = new THREE.Color(STATUS_COLORS[statusRef.current]);
 
     const animate = () => {
       animId = requestAnimationFrame(animate);
 
+      // Delta time normalized to 60 FPS (dt * 60 = 1.0 at 60 FPS)
+      const dt = Math.min(clock.getDelta(), 0.1);
+      const dtScale = dt * 60;
+
       // Smooth RMS Dampening
       const currentRms = Math.min(Math.max(rmsRef.current || 0, 0), 1.0);
-      smoothRms += (currentRms - smoothRms) * 0.18;
+      smoothRms += (currentRms - smoothRms) * Math.min(0.18 * dtScale, 1.0);
 
       // Update Target Color based on status
       const currentStatus = statusRef.current;
@@ -173,7 +178,7 @@ export function AudioOrb({ rmsVolume, status, size = 280 }: AudioOrbProps) {
       targetColor.setHex(hexColor);
 
       // Lerp Material Colors
-      const lerpFactor = 0.08;
+      const lerpFactor = Math.min(0.08 * dtScale, 1.0);
       outerRingMat.color.lerp(targetColor, lerpFactor);
       outerRingMat.emissive.lerp(targetColor, lerpFactor);
       midRingMat.color.lerp(targetColor, lerpFactor);
@@ -186,8 +191,8 @@ export function AudioOrb({ rmsVolume, status, size = 280 }: AudioOrbProps) {
       particleMat.color.lerp(targetColor, lerpFactor);
       pointLight.color.lerp(targetColor, lerpFactor);
 
-      // Dynamic Speed modulated by RMS and Status
-      const speedMultiplier = currentStatus === "speaking" ? 1.6 : currentStatus === "thinking" ? 1.2 : 1.0;
+      // Dynamic Speed modulated by RMS, Status, and Frame Delta
+      const speedMultiplier = (currentStatus === "speaking" ? 1.6 : currentStatus === "thinking" ? 1.2 : 1.0) * dtScale;
       const audioPulse = 1.0 + smoothRms * 1.5;
 
       // Gimbal Ring 3-Axis Rotations

@@ -23,6 +23,8 @@ def logistics(tmp_path):
 def test_system_diagnostics(logistics):
     diag = logistics.get_system_diagnostics()
     assert "System Diagnostics Telemetry" in diag
+    assert "System Time" in diag
+    assert "UTC+8" in diag
     assert "CPU Utilization" in diag
     assert "Memory Usage" in diag
 

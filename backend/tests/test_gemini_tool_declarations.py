@@ -25,7 +25,7 @@ def test_gemini_tool_declaration_parsing(tmp_path):
     game = GameInteractionLogistics()
     meeting = MeetingBiometricsLogistics(meetings_dir=str(tmp_path / "meetings"))
 
-    # Exposed tool functions for Gemini Live API (8 OS + 7 Dev + 7 GUI + 3 Browser + 3 Game + 2 Meeting = 30 tools)
+    # Exposed tool functions for Gemini Live API (consolidated lean set of 29 tools)
     tools_list = [
         logistics.get_system_diagnostics,
         logistics.launch_application_or_url,
@@ -35,6 +35,7 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         logistics.recall_context,
         logistics.execute_terminal_command,
         logistics.deep_os_file_executive,
+        mem.inspect_learned_habits_and_growth,
         dev.inspect_git_workspace,
         dev.inspect_local_dev_ports,
         dev.probe_network_target,
@@ -48,10 +49,8 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         gui.send_keyboard_shortcut,
         gui.screen_pixel_navigation,
         gui.manage_desktop_window,
-        gui.list_open_windows,
         browser.browser_navigate_and_parse_dom,
         browser.browser_interact_dom_element,
-        browser.browser_scroll_and_inspect,
         game.observe_game_state,
         game.evaluate_tactical_game_policy,
         game.send_game_input_action,
@@ -78,6 +77,6 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         tools=tools_list,
     )
     assert config is not None
-    assert len(config.tools) == 30
+    assert len(config.tools) == 29
 
     mem.close()

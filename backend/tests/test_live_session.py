@@ -433,15 +433,11 @@ async def test_client_vad_turn_closer(core_setup):
     assert core.status == "thinking"
     assert core._thinking_watchdog_task is not None
 
-    # Should have called send_realtime_input with audio_stream_end=True or send with end_of_turn=True
-    sent_end = False
+    # Phase 16: Verify audio_stream_end=True is NEVER sent (keeps stream open)
+    # and 1.5s of zero-filled PCM silence was sent to trigger server-side VAD
     for call in mock_session.send_realtime_input.call_args_list:
-        if call.kwargs.get("audio_stream_end") is True:
-            sent_end = True
-    for call in mock_session.send.call_args_list:
-        if call.kwargs.get("end_of_turn") is True:
-            sent_end = True
-    assert sent_end is True
+        assert call.kwargs.get("audio_stream_end") is not True
+    assert mock_session.send_realtime_input.call_count >= 16
 
     core._disarm_thinking_watchdog()
     stream_task.cancel()

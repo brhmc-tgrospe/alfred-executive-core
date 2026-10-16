@@ -9,11 +9,21 @@ Uses a fast, zero-dependency offline embedding model to eliminate cloud download
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import threading
 import uuid
-from typing import Optional, List
+from datetime import datetime, timezone, timedelta
+from typing import Optional, List, Dict, Any
 import numpy as np
+
+def get_utc8_now_str() -> str:
+    """Returns current timestamp string in strict UTC+8 timezone."""
+    return datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S UTC+8")
+
+def get_utc8_hour() -> int:
+    """Returns current hour (0-23) in strict UTC+8 timezone."""
+    return datetime.now(timezone(timedelta(hours=8))).hour
 
 try:
     import chromadb
@@ -86,7 +96,7 @@ class MemoryStore:
             base_dir = os.path.dirname(os.path.abspath(__file__))
             db_path = os.path.join(base_dir, "alfred_executive.db")
         self.db_path = db_path
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # Connect with WAL mode and thread safety
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -104,7 +114,7 @@ class MemoryStore:
         self._init_chroma()
 
     def _init_sqlite(self) -> None:
-        """Configures SQLite WAL journal mode and required tables."""
+        """Configures SQLite WAL journal mode and required tables with strict UTC+8 timestamps."""
         with self._lock:
             cursor = self.conn.cursor()
             cursor.execute("PRAGMA journal_mode=WAL;")
@@ -113,7 +123,7 @@ class MemoryStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'pending',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT NOT NULL
                 );
             """)
             cursor.execute("""
@@ -121,7 +131,26 @@ class MemoryStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event TEXT NOT NULL,
                     details TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    timestamp TEXT NOT NULL
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS director_habits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    habit_category TEXT NOT NULL,
+                    pattern_description TEXT NOT NULL UNIQUE,
+                    frequency_count INTEGER DEFAULT 1,
+                    typical_hour_utc8 INTEGER,
+                    last_observed_utc8 TEXT NOT NULL
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS interaction_episodes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp_utc8 TEXT NOT NULL,
+                    user_directive TEXT NOT NULL,
+                    alfred_action TEXT,
+                    learned_insight TEXT
                 );
             """)
             self.conn.commit()
@@ -161,7 +190,10 @@ class MemoryStore:
             if action_clean == "add":
                 if not task_item.strip():
                     return "Error: Cannot add an empty task description."
-                cursor.execute("INSERT INTO tasks (task, status) VALUES (?, 'pending')", (task_item.strip(),))
+                cursor.execute(
+                    "INSERT INTO tasks (task, status, created_at) VALUES (?, 'pending', ?)",
+                    (task_item.strip(), get_utc8_now_str()),
+                )
                 task_id = cursor.lastrowid
                 self.conn.commit()
                 return f"Task #{task_id} logged to executive agenda: '{task_item}'."
@@ -223,8 +255,8 @@ class MemoryStore:
         with self._lock:
             cursor = self.conn.cursor()
             cursor.execute(
-                "INSERT INTO audit_log (event, details) VALUES (?, ?)",
-                (f"REMEMBER_{category.upper()}", content),
+                "INSERT INTO audit_log (event, details, timestamp) VALUES (?, ?, ?)",
+                (f"REMEMBER_{category.upper()}", content, get_utc8_now_str()),
             )
             self.conn.commit()
 
@@ -269,6 +301,282 @@ class MemoryStore:
             return "Retrieved context from memory:\n" + "\n".join(formatted)
         except Exception as e:
             return f"Error recalling context: {e}"
+
+    def observe_and_learn_interaction(self, directive: str = "", tool_used: str = "") -> Dict[str, Any]:
+        """Observes user directives and tool execution, extracting habits, preferences, and episode logs in UTC+8.
+
+        Args:
+            directive: Natural language prompt or spoken turn from Director Qadir.
+            tool_used: Name of the logistics tool executed (if any).
+
+        Returns:
+            Dictionary containing extracted insights and updated habit counts.
+        """
+        dir_clean = (directive or "").strip()
+        tool_clean = (tool_used or "").strip()
+        if not dir_clean and not tool_clean:
+            return {"status": "skipped", "reason": "empty input"}
+
+        utc8_now = get_utc8_now_str()
+        current_hour = get_utc8_hour()
+        learned_items: List[str] = []
+
+        # 1. Map tool_used or directive keywords to high-level workflow
+        workflow_name = ""
+        if tool_clean:
+            tool_lower = tool_clean.lower()
+            if any(k in tool_lower for k in ("git", "code", "tail", "audit_source", "port")):
+                workflow_name = "Workflow: Coding & Development"
+            elif any(k in tool_lower for k in ("diagnostic", "network", "probe")):
+                workflow_name = "Workflow: System Telemetry & Diagnostics"
+            elif any(k in tool_lower for k in ("game", "policy", "scancode")):
+                workflow_name = "Workflow: Tactical Gaming Interaction"
+            elif any(k in tool_lower for k in ("meeting", "speaker", "diariz")):
+                workflow_name = "Workflow: Executive Meeting Biometrics"
+            elif any(k in tool_lower for k in ("word", "type_into", "keyboard", "window", "pixel")):
+                workflow_name = "Workflow: Desktop GUI Automation"
+            elif any(k in tool_lower for k in ("browser", "dom")):
+                workflow_name = "Workflow: Autonomous Web Navigation"
+            else:
+                workflow_name = f"Workflow: {tool_clean}"
+        elif dir_clean:
+            dir_lower = dir_clean.lower()
+            if any(k in dir_lower for k in ("code", "python", "script", "repo", "git", "debug")):
+                workflow_name = "Workflow: Coding & Development"
+            elif any(k in dir_lower for k in ("diagnostic", "cpu", "ram", "health", "system")):
+                workflow_name = "Workflow: System Telemetry & Diagnostics"
+            elif any(k in dir_lower for k in ("game", "rpg", "moba", "boss", "tactical")):
+                workflow_name = "Workflow: Tactical Gaming Interaction"
+            elif any(k in dir_lower for k in ("meeting", "transcribe", "minutes", "amira")):
+                workflow_name = "Workflow: Executive Meeting Biometrics"
+
+        # 2. Extract Preference and Correction Patterns from directive
+        preference_extracted = ""
+        category = "preference"
+
+        patterns = [
+            (r"(?i)\b(always\s+[^.!?\n,;]+)", "preference"),
+            (r"(?i)\b(never\s+[^.!?\n,;]+)", "preference"),
+            (r"(?i)\b(i\s+prefer\s+[^.!?\n,;]+)", "preference"),
+            (r"(?i)\b(prefer\s+[^.!?\n,;]+)", "preference"),
+            (r"(?i)\b(my\s+habit\s+is\s+[^.!?\n,;]+)", "preference"),
+            (r"(?i)\b(use\s+utc\+8[^.!?\n,;]*)", "preference"),
+            (r"(?i)\b(it'?s\s+not\s+[^.!?\n,;]+\s+but\s+[^.!?\n,;]+)", "correction"),
+            (r"(?i)\b(pronounced\s+(?:as\s+)?[^.!?\n,;]+)", "correction"),
+        ]
+
+        if dir_clean:
+            for pat, cat in patterns:
+                m = re.search(pat, dir_clean)
+                if m:
+                    raw_pref = m.group(1).strip()
+                    cleaned = raw_pref[0].upper() + raw_pref[1:]
+                    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+                    preference_extracted = cleaned
+                    category = cat
+                    break
+
+        with self._lock:
+            cursor = self.conn.cursor()
+
+            # Record workflow frequency
+            if workflow_name:
+                cursor.execute("""
+                    INSERT INTO director_habits (habit_category, pattern_description, frequency_count, typical_hour_utc8, last_observed_utc8)
+                    VALUES ('workflow', ?, 1, ?, ?)
+                    ON CONFLICT(pattern_description) DO UPDATE SET
+                        frequency_count = frequency_count + 1,
+                        typical_hour_utc8 = excluded.typical_hour_utc8,
+                        last_observed_utc8 = excluded.last_observed_utc8;
+                """, (workflow_name, current_hour, utc8_now))
+                learned_items.append(f"Recorded {workflow_name} at {current_hour:02d}:00 UTC+8")
+
+            # Record preference/correction
+            if preference_extracted:
+                cursor.execute("""
+                    INSERT INTO director_habits (habit_category, pattern_description, frequency_count, typical_hour_utc8, last_observed_utc8)
+                    VALUES (?, ?, 1, ?, ?)
+                    ON CONFLICT(pattern_description) DO UPDATE SET
+                        frequency_count = frequency_count + 1,
+                        typical_hour_utc8 = excluded.typical_hour_utc8,
+                        last_observed_utc8 = excluded.last_observed_utc8;
+                """, (category, preference_extracted, current_hour, utc8_now))
+                learned_items.append(f"Learned {category}: '{preference_extracted}'")
+
+            # Record interaction episode
+            episode_action = tool_clean or ("Learned Directive" if preference_extracted else "Processed Prompt")
+            episode_insight = preference_extracted or (f"Observed {workflow_name}" if workflow_name else dir_clean[:80])
+            cursor.execute("""
+                INSERT INTO interaction_episodes (timestamp_utc8, user_directive, alfred_action, learned_insight)
+                VALUES (?, ?, ?, ?)
+            """, (utc8_now, dir_clean or f"Action: {tool_clean}", episode_action, episode_insight))
+
+            self.conn.commit()
+
+        # Persist preference to ChromaDB if extracted
+        if preference_extracted:
+            try:
+                self.remember_fact(category, preference_extracted)
+            except Exception:
+                pass
+
+        return {
+            "status": "learned",
+            "workflow": workflow_name,
+            "preference": preference_extracted,
+            "learned_items": learned_items,
+            "timestamp_utc8": utc8_now,
+        }
+
+    def build_dynamic_director_profile(self) -> str:
+        """Summarizes Director Qadir's top learned preferences, recurring habits, recent episodes, and agenda."""
+        with self._lock:
+            cursor = self.conn.cursor()
+
+            # Top preferences & corrections
+            cursor.execute("""
+                SELECT pattern_description, frequency_count
+                FROM director_habits
+                WHERE habit_category IN ('preference', 'correction')
+                ORDER BY frequency_count DESC, id DESC
+                LIMIT 5
+            """)
+            pref_rows = cursor.fetchall()
+
+            # Recurring workflow habits
+            cursor.execute("""
+                SELECT pattern_description, frequency_count, typical_hour_utc8
+                FROM director_habits
+                WHERE habit_category = 'workflow'
+                ORDER BY frequency_count DESC, id DESC
+                LIMIT 5
+            """)
+            workflow_rows = cursor.fetchall()
+
+            # Recent episodes
+            cursor.execute("""
+                SELECT timestamp_utc8, user_directive, learned_insight
+                FROM interaction_episodes
+                ORDER BY id DESC
+                LIMIT 3
+            """)
+            episode_rows = cursor.fetchall()
+
+            # Pending agenda
+            cursor.execute("""
+                SELECT id, task
+                FROM tasks
+                WHERE status = 'pending'
+                ORDER BY id ASC
+                LIMIT 5
+            """)
+            agenda_rows = cursor.fetchall()
+
+        lines = [
+            f"[DYNAMIC EXECUTIVE MEMORY & LEARNED PROFILE - {get_utc8_now_str()}]:",
+            '• Principal: Director Qadir (pronounced "ka-dir")',
+            "• Mandatory Timezone: UTC+8 (Philippine Standard Time / Asia/Manila)",
+        ]
+
+        if pref_rows:
+            lines.append("• Top Learned Preferences & Mandates:")
+            for row in pref_rows:
+                lines.append(f"  - {row['pattern_description']} (Observed {row['frequency_count']}x)")
+        else:
+            lines.append("• Top Learned Preferences: Standing by for initial pattern extraction.")
+
+        if workflow_rows:
+            lines.append("• Recurring Operational Workflows & Typical Hours (UTC+8):")
+            for row in workflow_rows:
+                hour_str = f"{row['typical_hour_utc8']:02d}:00 UTC+8" if row['typical_hour_utc8'] is not None else "Variable"
+                lines.append(f"  - {row['pattern_description']} (Typical Peak: {hour_str}, Frequency: {row['frequency_count']})")
+
+        if episode_rows:
+            lines.append("• Recent Interaction Episodes:")
+            for row in episode_rows:
+                lines.append(f"  - [{row['timestamp_utc8']}] \"{row['user_directive'][:60]}\" -> Insight: {row['learned_insight']}")
+
+        if agenda_rows:
+            lines.append("• Current Executive Agenda:")
+            for row in agenda_rows:
+                lines.append(f"  - Task #{row['id']}: {row['task']}")
+
+        return "\n".join(lines)
+
+    def inspect_learned_habits_and_growth(self, action: str = "summary", habit_note: str = "") -> str:
+        """Inspects ALFRED's learned habits, Director preferences, and continuous adaptation metrics.
+
+        Args:
+            action: Action to perform: 'summary', 'preferences', 'habits', or 'log_note'.
+            habit_note: Custom observation or habit pattern to log when action is 'log_note'.
+
+        Returns:
+            Formatted diagnostic report of ALFRED's learning and adaptation growth.
+        """
+        act = action.strip().lower()
+
+        if act == "log_note":
+            if not habit_note.strip():
+                return "Error: habit_note cannot be empty when action is 'log_note'."
+            self.observe_and_learn_interaction(directive=f"Note: {habit_note.strip()}")
+            return f"Logged custom habit note into continuous memory ledger: '{habit_note.strip()}'."
+
+        with self._lock:
+            cursor = self.conn.cursor()
+
+            if act == "preferences":
+                cursor.execute("""
+                    SELECT habit_category, pattern_description, frequency_count, last_observed_utc8
+                    FROM director_habits
+                    WHERE habit_category IN ('preference', 'correction')
+                    ORDER BY frequency_count DESC, id DESC
+                """)
+                rows = cursor.fetchall()
+                if not rows:
+                    return "No specific preferences or corrections recorded in the learning ledger yet, Sir."
+                lines = [f"Learned Director Preferences & Directives ({len(rows)} entries):"]
+                for r in rows:
+                    lines.append(f"• [{r['habit_category'].upper()}] {r['pattern_description']} (Observed {r['frequency_count']}x, Last: {r['last_observed_utc8']})")
+                return "\n".join(lines)
+
+            if act == "habits":
+                cursor.execute("""
+                    SELECT pattern_description, frequency_count, typical_hour_utc8, last_observed_utc8
+                    FROM director_habits
+                    WHERE habit_category = 'workflow'
+                    ORDER BY frequency_count DESC, id DESC
+                """)
+                rows = cursor.fetchall()
+                if not rows:
+                    return "No operational workflow habits recorded yet, Sir."
+                lines = [f"Director Operational Workflow Habits ({len(rows)} tracked):"]
+                for r in rows:
+                    hour_str = f"{r['typical_hour_utc8']:02d}:00 UTC+8" if r['typical_hour_utc8'] is not None else "N/A"
+                    lines.append(f"• {r['pattern_description']} | Typical Peak: {hour_str} | Count: {r['frequency_count']} | Last: {r['last_observed_utc8']}")
+                return "\n".join(lines)
+
+            # Default: 'summary'
+            cursor.execute("SELECT COUNT(*) AS c FROM director_habits")
+            total_habits = cursor.fetchone()["c"]
+
+            cursor.execute("SELECT COUNT(*) AS c FROM interaction_episodes")
+            total_episodes = cursor.fetchone()["c"]
+
+            cursor.execute("SELECT COUNT(*) AS c FROM director_habits WHERE habit_category IN ('preference', 'correction')")
+            pref_count = cursor.fetchone()["c"]
+
+        profile = self.build_dynamic_director_profile()
+
+        summary = [
+            "A.L.F.R.E.D. Continuous Learning & Habit Adaptation Ledger:",
+            f"• Total Habits & Patterns Tracked: {total_habits}",
+            f"• Total Interaction Episodes Recorded: {total_episodes}",
+            f"• Verified Preferences / Mandates: {pref_count}",
+            f"• Cognitive Status: Active Autonomous Learning & Real-Time Adaptation Online",
+            "",
+            profile,
+        ]
+        return "\n".join(summary)
 
     def close(self) -> None:
         """Closes the SQLite database connection."""

@@ -18,6 +18,8 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
   const wsRef = useRef<WebSocket | null>(null);
   const connectFnRef = useRef<() => void>(() => {});
   const reconnectTimeoutRef = useRef<number | null>(null);
+  const lastStateRef = useRef<AlfredStatePacket>(DEFAULT_STATE);
+  const lastAudioThrottleRef = useRef<number>(0);
 
   const connect = useCallback(() => {
     try {
@@ -32,7 +34,46 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
         try {
           const data = JSON.parse(event.data);
           if (data && data.type === "state") {
-            setState(data as AlfredStatePacket);
+            const packet = data as AlfredStatePacket;
+            const last = lastStateRef.current;
+
+            // Only trigger full React re-render when primary operational telemetry changes
+            const primaryChanged =
+              last.status !== packet.status ||
+              last.transcript !== packet.transcript ||
+              last.active_tool !== packet.active_tool ||
+              last.cpu !== packet.cpu ||
+              last.ram !== packet.ram ||
+              last.ping_ms !== packet.ping_ms ||
+              last.current_device_id !== packet.current_device_id ||
+              JSON.stringify(last.pending_approval) !== JSON.stringify(packet.pending_approval) ||
+              last.input_devices?.length !== packet.input_devices?.length;
+
+            const now = Date.now();
+            if (primaryChanged) {
+              lastAudioThrottleRef.current = now;
+              lastStateRef.current = packet;
+              setState(packet);
+            } else {
+              // High-frequency rms_volume and mic_level updates throttled to 10Hz (every 100ms)
+              if (now - lastAudioThrottleRef.current >= 100) {
+                const rmsDiff = Math.abs((last.rms_volume ?? 0) - (packet.rms_volume ?? 0));
+                const micDiff = Math.abs((last.mic_level ?? 0) - (packet.mic_level ?? 0));
+                if (rmsDiff > 0.01 || micDiff > 0.01) {
+                  lastAudioThrottleRef.current = now;
+                  lastStateRef.current = {
+                    ...lastStateRef.current,
+                    rms_volume: packet.rms_volume,
+                    mic_level: packet.mic_level,
+                  };
+                  setState((prev) => ({
+                    ...prev,
+                    rms_volume: packet.rms_volume,
+                    mic_level: packet.mic_level,
+                  }));
+                }
+              }
+            }
           }
         } catch {
           // Ignore parse errors

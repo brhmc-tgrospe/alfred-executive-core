@@ -412,20 +412,24 @@ class GuiAutomationLogistics:
             logger.error("Error listing open windows: %s", e)
             return f"Error querying desktop windows: {e}"
 
-    def manage_desktop_window(self, window_title: str, action: str = "close") -> str:
-        """Controls desktop or browser windows: close, close_tab, minimize, maximize, restore, or focus.
+    def manage_desktop_window(self, window_title: str = "active", action: str = "close") -> str:
+        """Controls desktop application windows (close, minimize, maximize, restore, focus, or list).
 
         Args:
-            window_title: Window title substring (e.g. 'Chrome', 'Notepad', 'Edge') or 'active'/'current' for foreground window.
-            action: Window action to execute: 'close', 'close_tab', 'minimize', 'maximize', 'restore', 'focus'/'activate'.
+            window_title: Window title substring or 'active'/'current'. Set to '' or 'list' when action is 'list'.
+            action: Action to perform: 'close', 'close_tab', 'minimize', 'maximize', 'restore', 'focus', or 'list'.
 
         Returns:
-            Status confirmation report of the window management action.
+            Status confirmation report or formatted list of open windows.
         """
+        act = action.strip().lower()
+        if act == "list" or window_title.strip().lower() in ("list", ""):
+            if act == "list":
+                return self.list_open_windows()
+
         if not window_title.strip():
             return "Error: window_title parameter cannot be empty."
 
-        act = action.strip().lower()
         target = window_title.strip().lower()
 
         # 1. Locate window

@@ -194,27 +194,31 @@ class BrowserAutomationLogistics:
 
     async def browser_interact_dom_element(
         self,
-        target_selector_or_text: str,
+        target_selector_or_text: str = "",
         action: str = "click",
         input_text: str = "",
         submit_enter: bool = False,
     ) -> str:
-        """Interacts with a web element (click, type, hover, fill) by CSS selector or visible text.
+        """Interacts with a web element (click, type, fill, hover) or scrolls the active page.
 
         Parameters:
-            target_selector_or_text: CSS selector ('#submit-btn', 'input[name=q]') or visible element text ('Sign In').
-            action: Action to perform: 'click', 'type', 'fill', 'hover', 'clear', 'press_enter'.
+            target_selector_or_text: CSS selector, visible element text, or empty when scrolling.
+            action: Action to perform: 'click', 'type', 'fill', 'hover', 'scroll_down', 'scroll_up'.
             input_text: Text string to type into input fields if action is 'type' or 'fill'.
             submit_enter: If True, presses the Enter key immediately after the action.
 
         Returns:
             Status message describing the interaction outcome and current page state.
         """
+        act = action.lower().strip()
+        if "scroll" in act:
+            direction = "up" if "up" in act else "down"
+            return await self.browser_scroll_and_inspect(direction=direction)
+
         if not target_selector_or_text.strip():
             return "Error: target_selector_or_text parameter cannot be empty."
 
         target = target_selector_or_text.strip()
-        act = action.lower().strip()
 
         try:
             page = await self._ensure_browser()
