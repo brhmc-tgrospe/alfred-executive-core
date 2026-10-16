@@ -20,3 +20,6 @@
 ## 5. Stable Dependencies
 * Always pin and install stable releases of all libraries.
 * Do not introduce experimental pre-releases or release candidates.
+
+## 6. GitHub Account Configuration
+* Whenever pushing or syncing changes to GitHub, always use the `brhmc-tgrospe` account for this project.
