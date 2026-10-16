@@ -249,6 +249,14 @@ class AlfredHubCoordinator:
         """Broadcasts telemetry to HUD at 20Hz (every 50ms) for high-framerate visualizer response."""
         while self.is_running:
             try:
+                # Watchdog safeguard: auto-heal stuck speaking status when playback buffer is empty and speaker cooldown elapsed
+                if (
+                    self.live_core.status == "speaking"
+                    and not self.audio.is_playback_active()
+                    and not self.audio.is_speaker_locked()
+                ):
+                    self.live_core.set_status("listening" if self.audio.ptt_active else "idle")
+
                 await self.broadcast_state_packet()
                 await asyncio.sleep(0.05)
             except asyncio.CancelledError:

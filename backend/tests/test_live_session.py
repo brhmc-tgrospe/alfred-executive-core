@@ -181,3 +181,110 @@ async def test_send_startup_briefing(core_setup):
     assert second_try is False
     assert mock_session.send.await_count == 1
 
+
+@pytest.mark.asyncio
+async def test_turn_complete_empty_buffer_transitions_to_listening(core_setup):
+    """Regression test: verify status transitions immediately to listening when turn_complete arrives with empty buffer."""
+    core, logistics, audio, vision = core_setup
+    core.set_status("speaking")
+    audio.clear_playback()
+
+    class MockServerContent:
+        interrupted = False
+        model_turn = None
+        turn_complete = True
+        generation_complete = False
+
+    class MockResponse:
+        server_content = MockServerContent()
+        tool_call = None
+
+    await core.process_server_response(MockResponse())
+    assert core.status == "listening"
+
+
+@pytest.mark.asyncio
+async def test_generation_complete_transitions_to_listening(core_setup):
+    """Regression test: verify generation_complete signals turn completion and transitions to listening."""
+    core, logistics, audio, vision = core_setup
+    core.set_status("speaking")
+    audio.clear_playback()
+
+    class MockServerContent:
+        interrupted = False
+        model_turn = None
+        turn_complete = False
+        generation_complete = True
+
+    class MockResponse:
+        server_content = MockServerContent()
+        tool_call = None
+
+    await core.process_server_response(MockResponse())
+    assert core.status == "listening"
+
+
+@pytest.mark.asyncio
+async def test_speaking_watchdog_auto_reverts_to_listening(core_setup):
+    """Regression test: verify speaking watchdog reverts status to listening if server stalls without turn_complete."""
+    core, logistics, audio, vision = core_setup
+
+    class MockPart:
+        class InlineData:
+            data = b"\x10\x00" * 512
+        inline_data = InlineData()
+        text = None
+
+    class MockModelTurn:
+        parts = [MockPart()]
+
+    class MockServerContent:
+        interrupted = False
+        model_turn = MockModelTurn()
+        turn_complete = False
+        generation_complete = False
+
+    class MockResponse:
+        server_content = MockServerContent()
+        tool_call = None
+
+    await core.process_server_response(MockResponse())
+    assert core.status == "speaking"
+
+    # Playback drains
+    audio.clear_playback()
+    # Fast watchdog timeout for test
+    core._arm_speaking_watchdog(timeout_sec=0.2)
+
+    await asyncio.sleep(0.35)
+    assert core.status == "listening"
+
+
+@pytest.mark.asyncio
+async def test_interruption_cancels_drain_and_speaking_watchdogs(core_setup):
+    """Verify user barge-in cancels speaking watchdog and drain task."""
+    core, logistics, audio, vision = core_setup
+    core.set_status("speaking")
+    core._arm_speaking_watchdog(timeout_sec=5.0)
+    core._schedule_drain_and_transition()
+
+    assert core._speaking_watchdog_task is not None
+    assert core._drain_task is not None
+
+    class MockServerContent:
+        interrupted = True
+        model_turn = None
+        turn_complete = False
+        generation_complete = False
+
+    class MockResponse:
+        server_content = MockServerContent()
+        tool_call = None
+
+    await core.process_server_response(MockResponse())
+    await asyncio.sleep(0.01)  # Yield so task can process cancellation
+    assert core.status == "listening"
+    assert core._speaking_watchdog_task is None
+    assert core._drain_task.cancelled() or core._drain_task.done()
+
+

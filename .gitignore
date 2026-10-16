@@ -25,3 +25,4 @@ build/
 # Antigravity & OS
 .DS_Store
 Thumbs.db
+.alfred_browser_profile/

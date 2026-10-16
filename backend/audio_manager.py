@@ -159,17 +159,19 @@ class AudioManager:
         with self._playback_lock:
             return len(self._playback_buffer) > 0 or self.is_playing
 
-    async def wait_for_playback_drain(self, timeout: float = 12.0) -> None:
+    async def wait_for_playback_drain(self, timeout: float = 6.0) -> None:
         """Waits asynchronously until the playback bytearray buffer drains completely to 0 bytes."""
         start_time = asyncio.get_event_loop().time()
         # Give initial buffer a moment to begin playback
-        await asyncio.sleep(0.06)
+        await asyncio.sleep(0.04)
         while self.is_playback_active():
             if (asyncio.get_event_loop().time() - start_time) > timeout:
+                logger.warning("[AudioManager] Playback drain timed out after %.1fs. Forcibly clearing playback.", timeout)
+                self.clear_playback()
                 break
-            await asyncio.sleep(0.04)
+            await asyncio.sleep(0.03)
         # Small latency settling window
-        await asyncio.sleep(0.06)
+        await asyncio.sleep(0.04)
 
     def clear_playback(self) -> int:
         """Immediately flushes the speaker playback buffer and queue for barge-in interruption."""
@@ -251,9 +253,11 @@ class AudioManager:
                 self._turn_complete = False
                 return
 
-            # 2. Jitter Pre-buffering: wait until 120ms of audio has arrived or turn is explicitly complete
+            # 2. Jitter Pre-buffering: wait until 120ms of audio has arrived, or turn is explicitly complete,
+            # or prebuffering timed out (>150ms since last chunk arrival) to prevent deadlocking short utterances
             if self._prebuffering:
-                if buf_len >= self.jitter_prebuffer_bytes or self._turn_complete:
+                prebuffer_timed_out = (time.time() - self._last_playback_time) > 0.15
+                if buf_len >= self.jitter_prebuffer_bytes or self._turn_complete or prebuffer_timed_out:
                     self._prebuffering = False
                     self.is_playing = True
                 else:

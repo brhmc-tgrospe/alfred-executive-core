@@ -69,3 +69,25 @@ def test_websocket_approval_resolution(test_client):
         assert future.done()
         assert future.result() is True
         assert hub.pending_approval is None
+
+
+@pytest.mark.asyncio
+async def test_broadcast_auto_heals_stuck_speaking_status():
+    """Verify _broadcast_loop detects empty audio buffer and resets stuck speaking status to listening/idle."""
+    hub.audio.ptt_active = True
+    hub.live_core.set_status("speaking")
+    hub.audio.clear_playback()
+    hub.audio._last_playback_time = 0.0  # Cooled down past 450ms
+
+    assert hub.live_core.status == "speaking"
+    hub.is_running = True
+    task = asyncio.create_task(hub._broadcast_loop())
+    await asyncio.sleep(0.08)
+    hub.is_running = False
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert hub.live_core.status == "listening"

@@ -110,6 +110,8 @@ class AlfredLiveCore:
         self._session: Any = None
         self._initial_briefing_sent: bool = False
         self._thinking_watchdog_task: Optional[asyncio.Task] = None
+        self._speaking_watchdog_task: Optional[asyncio.Task] = None
+        self._drain_task: Optional[asyncio.Task] = None
 
     def update_transcript(self, text: str) -> None:
         """Notifies coordinator and connected HUD clients with status or transcript update."""
@@ -138,6 +140,38 @@ class AlfredLiveCore:
         if self._thinking_watchdog_task and not self._thinking_watchdog_task.done():
             self._thinking_watchdog_task.cancel()
         self._thinking_watchdog_task = None
+
+    def _arm_speaking_watchdog(self, timeout_sec: float = 2.5) -> None:
+        """Arms a speaking watchdog: if status remains 'speaking' without active playback, resets to listening."""
+        self._disarm_speaking_watchdog()
+        self._speaking_watchdog_task = asyncio.create_task(self._speaking_watchdog_worker(timeout_sec))
+
+    def _disarm_speaking_watchdog(self) -> None:
+        """Disarms the speaking watchdog."""
+        if self._speaking_watchdog_task and not self._speaking_watchdog_task.done():
+            self._speaking_watchdog_task.cancel()
+        self._speaking_watchdog_task = None
+
+    async def _speaking_watchdog_worker(self, timeout_sec: float = 2.5) -> None:
+        """Background worker enforcing that ALFRED never remains stuck in speaking status."""
+        try:
+            step = min(0.1, max(0.02, timeout_sec / 4))
+            elapsed = 0.0
+            while elapsed < timeout_sec:
+                await asyncio.sleep(step)
+                elapsed += step
+                if self.status != "speaking":
+                    return
+                # If audio is actively playing or queued, keep watchdog alive
+                if self.audio_manager.is_playback_active():
+                    elapsed = 0.0
+
+            if self.status == "speaking" and not self.audio_manager.is_playback_active():
+                logger.info("[ALFRED WATCHDOG] Speaking status timed out without active playback. Reverting to listening.")
+                next_status = "listening" if self.audio_manager.ptt_active else "idle"
+                self.set_status(next_status)
+        except asyncio.CancelledError:
+            pass
 
     async def _thinking_watchdog_worker(self, fallback_text: str) -> None:
         """Background worker enforcing the 8.0-second REASONING limit."""
@@ -264,13 +298,24 @@ class AlfredLiveCore:
                 logger.error("[A.L.F.R.E.D.] Error streaming mic chunk to Live API: %s", e)
                 await asyncio.sleep(0.05)
 
+    def _schedule_drain_and_transition(self) -> None:
+        """Schedules non-blocking playback drain and transition."""
+        if self._drain_task and not self._drain_task.done():
+            self._drain_task.cancel()
+        self._drain_task = asyncio.create_task(self._wait_drain_and_transition())
+
     async def _wait_drain_and_transition(self) -> None:
         """Waits for continuous speaker playback buffer to drain to 0 bytes, then resets HUD status."""
-        await self.audio_manager.wait_for_playback_drain()
-        if self.status in ("speaking", "thinking"):
-            next_status = "listening" if self.audio_manager.ptt_active else "idle"
-            self.set_status(next_status)
-            logger.info("[A.L.F.R.E.D.] Speech playback drained. Status transitioned to: %s", next_status)
+        try:
+            await self.audio_manager.wait_for_playback_drain()
+            if self.status in ("speaking", "thinking"):
+                next_status = "listening" if self.audio_manager.ptt_active else "idle"
+                self.set_status(next_status)
+                logger.info("[A.L.F.R.E.D.] Speech playback drained. Status transitioned to: %s", next_status)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._disarm_speaking_watchdog()
 
     async def process_server_response(self, response: Any, session: Any = None) -> None:
         """Processes a single Live API server response message (content, interruption, or tool calls)."""
@@ -280,6 +325,9 @@ class AlfredLiveCore:
             if getattr(server_content, "interrupted", False):
                 logger.info("[A.L.F.R.E.D.] User interrupted. Draining speaker playback queue.")
                 self._disarm_thinking_watchdog()
+                self._disarm_speaking_watchdog()
+                if self._drain_task and not self._drain_task.done():
+                    self._drain_task.cancel()
                 self.audio_manager.clear_playback()
                 self.set_status("listening")
                 return
@@ -292,21 +340,27 @@ class AlfredLiveCore:
                         self._disarm_thinking_watchdog()
                         self.set_status("speaking")
                         self.audio_manager.feed_speaker_audio(part.inline_data.data)
+                        self._arm_speaking_watchdog(timeout_sec=2.5)
 
                     if getattr(part, "text", None):
                         if self.on_transcript:
                             self.on_transcript(part.text)
 
             # 3. Model Turn Complete
-            if getattr(server_content, "turn_complete", False):
+            is_turn_done = bool(
+                getattr(server_content, "turn_complete", False)
+                or getattr(server_content, "generation_complete", False)
+            )
+            if is_turn_done:
                 self._disarm_thinking_watchdog()
                 self.audio_manager.mark_turn_complete()
-                # Run buffer drain monitoring non-blockingly as asyncio.create_task
+                # Run buffer drain monitoring non-blockingly
                 if self.audio_manager.is_playback_active():
-                    asyncio.create_task(self._wait_drain_and_transition())
+                    self._schedule_drain_and_transition()
                 else:
-                    if self.status != "speaking":
-                        self.set_status("listening")
+                    self._disarm_speaking_watchdog()
+                    next_status = "listening" if self.audio_manager.ptt_active else "idle"
+                    self.set_status(next_status)
 
         # 4. Tool Calls Dispatching
         tool_call = getattr(response, "tool_call", None)
@@ -432,6 +486,9 @@ class AlfredLiveCore:
             self.update_transcript(disconnect_msg)
         finally:
             self._disarm_thinking_watchdog()
+            self._disarm_speaking_watchdog()
+            if self._drain_task and not self._drain_task.done():
+                self._drain_task.cancel()
             self.is_running = False
             self._session = None
             self.set_status("idle")
@@ -458,6 +515,9 @@ class AlfredLiveCore:
         """Gracefully disconnects the session and halts audio streams."""
         self._loop_active = False
         self._disarm_thinking_watchdog()
+        self._disarm_speaking_watchdog()
+        if self._drain_task and not self._drain_task.done():
+            self._drain_task.cancel()
         self.is_running = False
         await self.audio_manager.stop()
         self.set_status("idle")
