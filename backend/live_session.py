@@ -22,6 +22,7 @@ from backend.audio_manager import AudioManager, calculate_rms
 from backend.vision_manager import VisionManager
 from backend.tools.dev_logistics import DevLogistics
 from backend.tools.gui_automation import GuiAutomationLogistics
+from backend.tools.browser_automation import BrowserAutomationLogistics
 
 logger = logging.getLogger("AlfredLiveSession")
 load_dotenv()
@@ -29,7 +30,7 @@ load_dotenv()
 ALFRED_SYSTEM_PROMPT = """You are A.L.F.R.E.D. (Autonomous Logistics Functional Response & Executive Director).
 Voice & Persona: Impeccably articulate, composed, dryly witty British executive director.
 Address the user as "Sir" or "Director Qadir" (pronounced "ka-dir"). Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
-Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, and full visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut). NEVER tell Director Qadir that you cannot type into Notepad, Microsoft Word, or the Antigravity IDE—proactively use these visual tools so Director Qadir can watch you write and edit live on screen. From now on, address Director Qadir with his title and surname."""
+Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, live visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut, screen_pixel_navigation), deep OS file management (deep_os_file_executive), and full autonomous browser automation with persistent sessions (browser_navigate_and_parse_dom, browser_interact_dom_element, browser_scroll_and_inspect). NEVER tell Director Qadir that you cannot interact with websites, click desktop pixels, type into Notepad/Word/IDEs, or search and launch files—proactively execute these tools on Director Qadir's behalf. Always address Director Qadir with his title and surname."""
 
 
 class AlfredLiveCore:
@@ -42,6 +43,7 @@ class AlfredLiveCore:
         vision_manager: Optional[VisionManager] = None,
         dev_logistics: Optional[DevLogistics] = None,
         gui_logistics: Optional[GuiAutomationLogistics] = None,
+        browser_logistics: Optional[BrowserAutomationLogistics] = None,
         api_key: Optional[str] = None,
         model_id: str = "gemini-3.8-live",
         voice_name: Optional[str] = None,
@@ -59,8 +61,9 @@ class AlfredLiveCore:
         self.vision_manager = vision_manager or VisionManager()
         self.dev_logistics = dev_logistics or DevLogistics()
         self.gui_logistics = gui_logistics or GuiAutomationLogistics()
+        self.browser_logistics = browser_logistics or BrowserAutomationLogistics()
 
-        # Build tools list ensuring core developer tools and GUI automation hands are included
+        # Build tools list ensuring core developer tools, GUI automation hands, and browser automation are included
         dev_tools = [
             self.dev_logistics.inspect_git_workspace,
             self.dev_logistics.inspect_local_dev_ports,
@@ -75,10 +78,16 @@ class AlfredLiveCore:
             self.gui_logistics.write_live_word_document,
             self.gui_logistics.visual_code_edit,
             self.gui_logistics.send_keyboard_shortcut,
+            self.gui_logistics.screen_pixel_navigation,
+        ]
+        browser_tools = [
+            self.browser_logistics.browser_navigate_and_parse_dom,
+            self.browser_logistics.browser_interact_dom_element,
+            self.browser_logistics.browser_scroll_and_inspect,
         ]
         registered_names = {getattr(fn, "__name__", "") for fn in (tools_list or [])}
         final_tools = list(tools_list or [])
-        for t in dev_tools + gui_tools:
+        for t in dev_tools + gui_tools + browser_tools:
             if getattr(t, "__name__", "") not in registered_names:
                 final_tools.append(t)
 
@@ -225,8 +234,11 @@ class AlfredLiveCore:
     async def _stream_mic_to_alfred(self, session: Any) -> None:
         """Pulls 16kHz mono PCM chunks from local mic queue and streams to Gemini Live API with Smart VAD speech gating."""
         last_speech_time: float = 0.0
-        SPEECH_THRESHOLD = 0.015
-        TRAILING_SILENCE_SEC = 1.2
+        was_speaking: bool = False
+        turn_closed: bool = False
+        SPEECH_THRESHOLD = 0.008
+        TRAILING_SILENCE_SEC = 1.0
+        EXPLICIT_TURN_TIMEOUT = 1.5
         BARGE_IN_THRESHOLD = 0.15
 
         while self.is_running:
@@ -245,36 +257,82 @@ class AlfredLiveCore:
                         self.audio_manager.clear_playback()
                         self.set_status("listening")
                         last_speech_time = current_time
+                        was_speaking = True
+                        turn_closed = False
                     else:
                         # Suppress sending ambient audio to prevent Gemini VAD turn collisions
                         continue
 
-                # 2. In listening / standby mode, gate speech with 1.2s trailing silence
+                # 2. In listening mode, track speaking state and flush VAD
                 if rms >= SPEECH_THRESHOLD:
                     last_speech_time = current_time
+                    was_speaking = True
+                    turn_closed = False
                     if self.status != "speaking":
                         self.set_status("listening")
-                    should_send = True
-                else:
-                    should_send = (current_time - last_speech_time) <= TRAILING_SILENCE_SEC
 
-                if not should_send:
-                    # In silent room, do not blast Gemini Live with endless empty chunks!
-                    continue
-
-                if hasattr(session, "send_realtime_input"):
-                    await session.send_realtime_input(
-                        audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
-                    )
+                    # Stream real PCM chunk
+                    if hasattr(session, "send_realtime_input"):
+                        await session.send_realtime_input(
+                            audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
+                        )
+                    else:
+                        await session.send(
+                            input={"data": chunk, "mime_type": "audio/pcm;rate=16000"},
+                            end_of_turn=False,
+                        )
                 else:
-                    await session.send(
-                        input={"data": chunk, "mime_type": "audio/pcm;rate=16000"},
-                        end_of_turn=False,
-                    )
+                    if was_speaking:
+                        elapsed = current_time - last_speech_time
+                        if elapsed <= TRAILING_SILENCE_SEC:
+                            # Stream clean digital silence to flush Gemini's server-side VAD buffer
+                            zero_chunk = bytes(len(chunk))
+                            if hasattr(session, "send_realtime_input"):
+                                await session.send_realtime_input(
+                                    audio=types.Blob(data=zero_chunk, mime_type="audio/pcm;rate=16000")
+                                )
+                            else:
+                                await session.send(
+                                    input={"data": zero_chunk, "mime_type": "audio/pcm;rate=16000"},
+                                    end_of_turn=False,
+                                )
+                        elif not turn_closed:
+                            if elapsed <= EXPLICIT_TURN_TIMEOUT:
+                                zero_chunk = bytes(len(chunk))
+                                if hasattr(session, "send_realtime_input"):
+                                    await session.send_realtime_input(
+                                        audio=types.Blob(data=zero_chunk, mime_type="audio/pcm;rate=16000")
+                                    )
+                                else:
+                                    await session.send(
+                                        input={"data": zero_chunk, "mime_type": "audio/pcm;rate=16000"},
+                                        end_of_turn=False,
+                                    )
+                            else:
+                                # Over 1.5s since speech stopped and Gemini hasn't started responding
+                                if self.status == "listening":
+                                    logger.info(
+                                        "[A.L.F.R.E.D.] Speech stopped for >%.1fs. Sending explicit audio turn completion to Gemini Live API.",
+                                        EXPLICIT_TURN_TIMEOUT,
+                                    )
+                                    try:
+                                        await session.send(input="", end_of_turn=True)
+                                        self.set_status("thinking")
+                                        self._arm_thinking_watchdog(fallback_text="Spoken User Directive")
+                                    except Exception as send_err:
+                                        logger.warning("[A.L.F.R.E.D.] Failed to send explicit turn completion: %s", send_err)
+                                turn_closed = True
+                                was_speaking = False
+                    else:
+                        # Ambient room silence: suppress sending empty frames
+                        continue
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error("Error streaming mic chunk to Live API: %s", e)
+                logger.error("[A.L.F.R.E.D.] Error streaming mic chunk to Live API: %s", e)
+                was_speaking = False
+                turn_closed = False
                 await asyncio.sleep(0.05)
 
     async def _wait_drain_and_transition(self) -> None:
@@ -330,7 +388,7 @@ class AlfredLiveCore:
                 await self.dispatch_tool_call(session, fc)
 
     async def _receive_from_alfred(self, session: Any) -> None:
-        """Receives 24kHz audio chunks, transcripts, and tool calls from Gemini Live API."""
+        """Receives 24kHz audio chunks, transcripts, and tool calls from Gemini Live API with automatic stream recovery."""
         while self.is_running:
             try:
                 async for response in session.receive():
@@ -342,8 +400,9 @@ class AlfredLiveCore:
             except Exception as e:
                 if not self.is_running:
                     break
-                logger.error("Error in Live API receive stream: %s", e)
-                await asyncio.sleep(0.2)
+                logger.error("[A.L.F.R.E.D.] Error in Live API receive stream: %s. Initiating stream recovery.", e)
+                # Break out to terminate TaskGroup and trigger automatic reconnection loop
+                break
 
     async def send_startup_briefing(self, session: Any) -> bool:
         """Queries fast diagnostics & briefing notes and triggers initial executive greeting turn."""

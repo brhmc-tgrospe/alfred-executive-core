@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import struct
 import threading
 from typing import Optional, List, Dict, Any
@@ -266,20 +267,106 @@ class AudioManager:
                     pass
 
     def list_input_devices(self) -> List[Dict[str, Any]]:
-        """Lists available sounddevice audio input devices."""
+        """Lists available sounddevice audio input devices filtered for clean, physically active microphones.
+
+        Filters out virtual mappers, loopbacks, kernel drivers, and disconnected devices.
+        Prefers a single Windows Host API (MME or WASAPI) and deduplicates by normalized name.
+        """
         if sd is None:
             return []
-        devices = []
+        devices: List[Dict[str, Any]] = []
         try:
+            all_devs = sd.query_devices()
+            host_apis = {i: h.get("name", "") for i, h in enumerate(sd.query_hostapis())}
             default_in = sd.default.device[0] if hasattr(sd.default, "device") else -1
-            for idx, dev in enumerate(sd.query_devices()):
-                if dev.get("max_input_channels", 0) > 0:
-                    devices.append({
-                        "id": idx,
-                        "name": str(dev.get("name", f"Microphone {idx}")).strip(),
-                        "channels": dev.get("max_input_channels", 1),
-                        "is_default": (idx == default_in),
-                    })
+
+            banned_keywords = [
+                "sound mapper",
+                "primary sound",
+                "stereo mix",
+                "pc speaker",
+                "@system32",
+                "hands-free",
+                "output",
+            ]
+
+            valid_candidates: List[Dict[str, Any]] = []
+            for idx, dev in enumerate(all_devs):
+                if dev.get("max_input_channels", 0) <= 0:
+                    continue
+                raw_name = str(dev.get("name", f"Microphone {idx}")).strip()
+                lower_name = raw_name.lower()
+
+                # Filter virtual/mapper/loopback/kernel strings
+                if any(b in lower_name for b in banned_keywords):
+                    continue
+
+                # Filter empty parentheses like "Microphone Array 1 ()"
+                if re.search(r"\(\s*\)$", raw_name) or "()" in raw_name:
+                    continue
+
+                # Verify device can actually be opened at input sample rate
+                try:
+                    sd.check_input_settings(device=idx, samplerate=self.input_sample_rate)
+                except Exception:
+                    continue
+
+                host_api = host_apis.get(dev.get("hostapi", -1), "")
+                valid_candidates.append({
+                    "id": idx,
+                    "name": raw_name,
+                    "host_api": host_api,
+                    "channels": dev.get("max_input_channels", 1),
+                    "is_default": (idx == default_in),
+                })
+
+            if not valid_candidates:
+                return []
+
+            # Determine preferred host API: prioritize host API of default device, then MME, DirectSound, WASAPI
+            default_api = None
+            for c in valid_candidates:
+                if c["is_default"]:
+                    default_api = c["host_api"]
+                    break
+
+            preferred_order = [default_api, "MME", "Windows DirectSound", "Windows WASAPI"]
+            preferred_order = [api for api in preferred_order if api]
+
+            chosen_candidates: List[Dict[str, Any]] = []
+            for p_api in preferred_order:
+                matching = [c for c in valid_candidates if c["host_api"] == p_api]
+                if matching:
+                    chosen_candidates = matching
+                    break
+
+            if not chosen_candidates:
+                chosen_candidates = valid_candidates
+
+            # Deduplicate by normalized name and clean formatting
+            seen_keys: set = set()
+            for c in chosen_candidates:
+                name = c["name"].replace("\xae", "").replace("\ufffd", "").strip()
+                # Remove unprintable / non-ascii artifacts
+                name = re.sub(r"[^\x20-\x7E]", "", name).strip()
+                # Balance truncated parentheses if any
+                if name.count("(") > name.count(")"):
+                    name = name + " Sound)"
+                name = re.sub(r"\s+", " ", name)
+
+                # Normalized deduplication key (first 14 alphanumeric chars)
+                norm_key = re.sub(r"[^a-zA-Z0-9]", "", name).lower()[:14]
+                if norm_key in seen_keys:
+                    continue
+                seen_keys.add(norm_key)
+
+                devices.append({
+                    "id": c["id"],
+                    "name": name,
+                    "channels": c["channels"],
+                    "is_default": c["is_default"],
+                })
+
         except Exception as e:
             logger.warning("Failed to query audio input devices: %s", e)
         return devices

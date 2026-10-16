@@ -9,6 +9,7 @@ from backend.memory.memory_store import MemoryStore
 from backend.tools.os_logistics import OSLogistics
 from backend.tools.dev_logistics import DevLogistics
 from backend.tools.gui_automation import GuiAutomationLogistics
+from backend.tools.browser_automation import BrowserAutomationLogistics
 
 
 def test_gemini_tool_declaration_parsing(tmp_path):
@@ -18,8 +19,9 @@ def test_gemini_tool_declaration_parsing(tmp_path):
     logistics = OSLogistics(memory_store=mem, approval_timeout=1.0)
     dev = DevLogistics()
     gui = GuiAutomationLogistics()
+    browser = BrowserAutomationLogistics(profile_dir=str(tmp_path / "browser_profile"))
 
-    # Exposed tool functions for Gemini Live API (7 OS + 7 Dev + 4 GUI = 18 tools)
+    # Exposed tool functions for Gemini Live API (8 OS + 7 Dev + 5 GUI + 3 Browser = 23 tools)
     tools_list = [
         logistics.get_system_diagnostics,
         logistics.launch_application_or_url,
@@ -28,6 +30,7 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         logistics.remember_fact,
         logistics.recall_context,
         logistics.execute_terminal_command,
+        logistics.deep_os_file_executive,
         dev.inspect_git_workspace,
         dev.inspect_local_dev_ports,
         dev.probe_network_target,
@@ -39,6 +42,10 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         gui.write_live_word_document,
         gui.visual_code_edit,
         gui.send_keyboard_shortcut,
+        gui.screen_pixel_navigation,
+        browser.browser_navigate_and_parse_dom,
+        browser.browser_interact_dom_element,
+        browser.browser_scroll_and_inspect,
     ]
 
     # Verify functions have valid docstrings and strict type hints
@@ -60,6 +67,6 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         tools=tools_list,
     )
     assert config is not None
-    assert len(config.tools) == 18
+    assert len(config.tools) == 23
 
     mem.close()

@@ -116,3 +116,47 @@ async def test_execute_high_risk_approval_timeout():
 
     assert "timed out" in result.lower()
     assert "aborted" in result.lower()
+
+
+def test_deep_os_file_executive_search_and_actions(tmp_path):
+    """Verifies recursive file search, formatting, and open/reveal execution dispatch."""
+    from unittest.mock import patch
+
+    # Create dummy directory structure
+    sub_dir = tmp_path / "subproject"
+    sub_dir.mkdir()
+    target_file = sub_dir / "executive_report_2026.pdf"
+    target_file.write_text("Executive Briefing Content")
+    other_file = tmp_path / "scratch.py"
+    other_file.write_text("print('hello')")
+
+    log = OSLogistics()
+
+    # 1. Validation tests
+    assert "cannot be empty" in log.deep_os_file_executive(str(tmp_path), "")
+    assert "does not exist" in log.deep_os_file_executive(str(tmp_path / "nonexistent_dir_999"), "*.pdf")
+
+    # 2. Search action
+    search_res = log.deep_os_file_executive(str(tmp_path), "executive_report", action="search")
+    assert "Found 1 match" in search_res
+    assert "executive_report_2026.pdf" in search_res
+    assert str(target_file) in search_res
+
+    # 3. Glob search
+    glob_res = log.deep_os_file_executive(str(tmp_path), "*.py", action="search")
+    assert "scratch.py" in glob_res
+
+    # 4. Open / Execute action
+    with patch("os.startfile", create=True) as mock_startfile:
+        open_res = log.deep_os_file_executive(str(tmp_path), "executive_report", action="open")
+        assert "Successfully launched" in open_res
+        assert "executive_report_2026.pdf" in open_res
+        mock_startfile.assert_called_once_with(str(target_file))
+
+    # 5. Reveal action in Explorer
+    with patch("subprocess.Popen") as mock_popen:
+        reveal_res = log.deep_os_file_executive(str(tmp_path), "executive_report", action="reveal")
+        assert "Successfully revealed" in reveal_res
+        assert "Windows Explorer" in reveal_res
+        mock_popen.assert_called_once()
+

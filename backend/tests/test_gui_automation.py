@@ -112,3 +112,51 @@ def test_write_live_word_document_fallback(gui):
         result = gui.write_live_word_document("Quarterly Roadmap", "Paragraph 1\n\nParagraph 2")
         assert "Microsoft Word COM unavailable" in result
         mock_type.assert_called_once()
+
+
+def test_screen_pixel_navigation_bounds_validation(gui):
+    """Verifies that out-of-bounds coordinates are rejected with an informative error."""
+    with patch("backend.tools.gui_automation.pyautogui") as mock_pg:
+        mock_pg.size.return_value = (1920, 1080)
+
+        err_negative = gui.screen_pixel_navigation(-10, 500, action="click")
+        assert "outside screen bounds" in err_negative
+
+        err_overflow = gui.screen_pixel_navigation(2500, 500, action="click")
+        assert "outside screen bounds" in err_overflow
+
+
+def test_screen_pixel_navigation_actions(gui):
+    """Verifies all supported desktop mouse actions dispatch to pyautogui correctly."""
+    with patch("backend.tools.gui_automation.pyautogui") as mock_pg:
+        mock_pg.size.return_value = (1920, 1080)
+
+        # 1. Click
+        res_click = gui.screen_pixel_navigation(500, 300, action="click")
+        assert "Successfully executed desktop mouse click" in res_click
+        mock_pg.click.assert_called_with(500, 300)
+
+        # 2. Double click
+        res_dc = gui.screen_pixel_navigation(500, 300, action="double_click")
+        assert "Successfully executed desktop mouse double_click" in res_dc
+        mock_pg.doubleClick.assert_called_with(500, 300)
+
+        # 3. Right click
+        res_rc = gui.screen_pixel_navigation(500, 300, action="right_click")
+        assert "Successfully executed desktop mouse right_click" in res_rc
+        mock_pg.rightClick.assert_called_with(500, 300)
+
+        # 4. Move
+        res_move = gui.screen_pixel_navigation(500, 300, action="move")
+        assert "Successfully executed desktop mouse move" in res_move
+        mock_pg.moveTo.assert_called_with(500, 300, duration=0.2)
+
+        # 5. Scroll
+        res_scroll = gui.screen_pixel_navigation(500, 300, action="scroll", scroll_amount=-300)
+        assert "Successfully executed desktop mouse scroll" in res_scroll
+        mock_pg.scroll.assert_called_with(-300)
+
+        # 6. Unsupported action
+        res_bad = gui.screen_pixel_navigation(500, 300, action="triple_flip")
+        assert "Unsupported mouse action" in res_bad
+

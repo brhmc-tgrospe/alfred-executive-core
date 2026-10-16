@@ -9,10 +9,12 @@ All functions use strict Python type hints and docstrings for google-genai schem
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 import webbrowser
 from typing import Awaitable, Callable, Optional
@@ -252,3 +254,121 @@ class OSLogistics:
             return f"Command execution timed out after 15 seconds."
         except Exception as e:
             return f"Command execution failed: {e}"
+
+    def deep_os_file_executive(
+        self,
+        root_directory: str,
+        query_pattern: str,
+        action: str = "search",
+    ) -> str:
+        """Performs fast recursive search across local directories matching query_pattern,
+        and optionally launches, executes, or reveals the target file in Windows Explorer.
+
+        Args:
+            root_directory: Starting directory path (e.g. 'C:\\', 'd:\\alfred-executive-core', or '.' for current directory).
+            query_pattern: Filename substring or pattern to match (e.g. 'start_alfred.bat', '*.py', 'report').
+            action: Action to perform: 'search' (list matches), 'open'/'execute' (launch with default app), 'reveal' (show in Windows Explorer).
+
+        Returns:
+            Formatted report of found files or execution status.
+        """
+        if not query_pattern.strip():
+            return "Error: query_pattern parameter cannot be empty."
+
+        clean_root = root_directory.strip() if root_directory.strip() else "."
+        abs_root = os.path.abspath(os.path.expanduser(clean_root))
+        if not os.path.exists(abs_root) or not os.path.isdir(abs_root):
+            return f"Error: Root directory '{abs_root}' does not exist or is not a directory."
+
+        act = action.strip().lower()
+        pattern = query_pattern.strip()
+        pattern_lower = pattern.lower()
+        use_glob = any(char in pattern for char in ("*", "?", "["))
+
+        matches = []
+        files_scanned = 0
+        MAX_SCANNED = 15000
+        MAX_MATCHES = 25
+
+        skip_dirs = {
+            ".git",
+            "node_modules",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "$recycle.bin",
+            "system volume information",
+        }
+
+        try:
+            for root, dirs, files in os.walk(abs_root):
+                dirs[:] = [d for d in dirs if d.lower() not in skip_dirs]
+                for file_name in files:
+                    files_scanned += 1
+                    matched = False
+                    if use_glob:
+                        matched = fnmatch.fnmatch(file_name.lower(), pattern_lower)
+                    else:
+                        matched = pattern_lower in file_name.lower()
+
+                    if matched:
+                        file_path = os.path.join(root, file_name)
+                        try:
+                            st = os.stat(file_path)
+                            size_kb = st.st_size / 1024.0
+                            size_str = f"{size_kb / 1024.0:.1f} MB" if size_kb > 1024 else f"{size_kb:.1f} KB"
+                            mtime_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime))
+                            matches.append({
+                                "name": file_name,
+                                "path": file_path,
+                                "size": size_str,
+                                "modified": mtime_str,
+                            })
+                        except Exception:
+                            matches.append({
+                                "name": file_name,
+                                "path": file_path,
+                                "size": "unknown",
+                                "modified": "unknown",
+                            })
+
+                        if len(matches) >= MAX_MATCHES:
+                            break
+                    if files_scanned >= MAX_SCANNED:
+                        break
+                if len(matches) >= MAX_MATCHES or files_scanned >= MAX_SCANNED:
+                    break
+        except Exception as e:
+            return f"Error during filesystem search: {e}"
+
+        if not matches:
+            return f"No files matching '{pattern}' found in '{abs_root}' (scanned {files_scanned} files)."
+
+        if act in ("open", "execute"):
+            target_file = matches[0]["path"]
+            try:
+                if hasattr(os, "startfile"):
+                    os.startfile(target_file)
+                else:
+                    subprocess.Popen([target_file], shell=True)
+                return f"Successfully launched '{matches[0]['name']}' ({target_file}) with system executive handler."
+            except Exception as e:
+                return f"Failed to launch file '{target_file}': {e}"
+
+        elif act == "reveal":
+            target_file = matches[0]["path"]
+            try:
+                subprocess.Popen(f'explorer /select,"{os.path.normpath(target_file)}"')
+                return f"Successfully revealed '{matches[0]['name']}' in Windows Explorer: {target_file}"
+            except Exception as e:
+                return f"Failed to reveal file '{target_file}': {e}"
+
+        else:
+            # Default: 'search'
+            report_lines = [
+                f"Found {len(matches)} match{'es' if len(matches) > 1 else ''} for '{pattern}' in '{abs_root}' (scanned {files_scanned} files):",
+            ]
+            for m in matches:
+                report_lines.append(f"  • {m['name']} ({m['size']}, {m['modified']})\n    Path: {m['path']}")
+            return "\n".join(report_lines)
+

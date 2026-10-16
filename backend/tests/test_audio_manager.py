@@ -103,3 +103,49 @@ def test_mic_peak_hold_and_visual_level():
     # Holds across decay: still > 0.25
     assert mgr.visual_mic_level > 0.25
     assert mgr.visual_mic_level < prev_visual
+
+
+def test_list_input_devices_filtering_and_deduplication(monkeypatch):
+    """Verify list_input_devices filters out mappers, loopbacks, kernel strings, and deduplicates cleanly."""
+    mgr = AudioManager()
+
+    mock_devices = [
+        {"name": "Microsoft Sound Mapper - Input", "max_input_channels": 2, "hostapi": 0},
+        {"name": "Microphone Array (Intel\xae Smart ", "max_input_channels": 4, "hostapi": 0},
+        {"name": "Headset (ERAZER XF55)", "max_input_channels": 1, "hostapi": 0},
+        {"name": "Primary Sound Capture Driver", "max_input_channels": 2, "hostapi": 1},
+        {"name": "Microphone Array (Intel\xae Smart Sound Technology)", "max_input_channels": 4, "hostapi": 1},
+        {"name": "Stereo Mix (Realtek HD Audio)", "max_input_channels": 2, "hostapi": 3},
+        {"name": "PC Speaker (Realtek)", "max_input_channels": 2, "hostapi": 3},
+        {"name": "Input (@System32\\drivers\\btha2dp.sys)", "max_input_channels": 2, "hostapi": 3},
+        {"name": "Microphone Array 1 ()", "max_input_channels": 2, "hostapi": 3},
+    ]
+    mock_hostapis = [
+        {"name": "MME"},
+        {"name": "Windows DirectSound"},
+        {"name": "Windows WASAPI"},
+        {"name": "Windows WDM-KS"},
+    ]
+
+    import sounddevice as mock_sd
+    monkeypatch.setattr(mock_sd, "query_devices", lambda: mock_devices)
+    monkeypatch.setattr(mock_sd, "query_hostapis", lambda: mock_hostapis)
+    monkeypatch.setattr(mock_sd.default, "device", [1, 0])
+    monkeypatch.setattr(mock_sd, "check_input_settings", lambda **kwargs: None)
+
+    devices = mgr.list_input_devices()
+    names = [d["name"] for d in devices]
+
+    # Verify virtual and invalid driver names are completely excluded
+    for banned in ["Sound Mapper", "Primary Sound", "Stereo Mix", "PC Speaker", "@System32", "()"]:
+        assert not any(banned.lower() in n.lower() for n in names)
+
+    # Verify clean physical devices are present and deduplicated
+    assert len(devices) == 2
+    assert any("Microphone Array" in n for n in names)
+    assert any("Headset (ERAZER XF55)" in n for n in names)
+    # Check default flag
+    default_dev = [d for d in devices if d["is_default"]]
+    assert len(default_dev) == 1
+    assert default_dev[0]["id"] == 1
+

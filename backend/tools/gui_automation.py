@@ -334,3 +334,49 @@ class GuiAutomationLogistics:
             return f"Successfully sent shortcut '{hotkey_combo}' to window '{matched_title}'."
         except Exception as e:
             return f"Error sending hotkey combo '{hotkey_combo}': {e}"
+
+    def screen_pixel_navigation(
+        self,
+        x: int,
+        y: int,
+        action: str = "click",
+        scroll_amount: int = 0,
+    ) -> str:
+        """Performs precise desktop mouse actions at specific (x, y) screen pixel coordinates.
+
+        Args:
+            x: Horizontal pixel coordinate on the desktop screen.
+            y: Vertical pixel coordinate on the desktop screen.
+            action: Action to perform: 'click', 'double_click', 'right_click', 'move', 'scroll'.
+            scroll_amount: Number of scroll ticks for 'scroll' action (positive scrolls up, negative down).
+
+        Returns:
+            Confirmation report indicating the pixel interaction executed.
+        """
+        if pyautogui is None:
+            return "Error: pyautogui is unavailable on this host."
+
+        act = action.strip().lower()
+        try:
+            screen_w, screen_h = pyautogui.size()
+            if x < 0 or x >= screen_w or y < 0 or y >= screen_h:
+                return f"Error: Pixel coordinates ({x}, {y}) are outside screen bounds ({screen_w}x{screen_h})."
+
+            if act == "click":
+                pyautogui.click(x, y)
+            elif act == "double_click":
+                pyautogui.doubleClick(x, y)
+            elif act == "right_click":
+                pyautogui.rightClick(x, y)
+            elif act == "move":
+                pyautogui.moveTo(x, y, duration=0.2)
+            elif act == "scroll":
+                pyautogui.moveTo(x, y)
+                pyautogui.scroll(scroll_amount)
+            else:
+                return f"Error: Unsupported mouse action '{action}'. Supported: 'click', 'double_click', 'right_click', 'move', 'scroll'."
+
+            return f"Successfully executed desktop mouse {act} at coordinates ({x}, {y})."
+        except Exception as e:
+            logger.error("Error executing screen_pixel_navigation: %s", e)
+            return f"Error performing mouse action at ({x}, {y}): {e}"

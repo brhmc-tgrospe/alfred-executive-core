@@ -28,6 +28,7 @@ from backend.memory.memory_store import MemoryStore
 from backend.tools.os_logistics import OSLogistics
 from backend.tools.dev_logistics import DevLogistics
 from backend.tools.gui_automation import GuiAutomationLogistics
+from backend.tools.browser_automation import BrowserAutomationLogistics
 from backend.live_session import AlfredLiveCore
 
 load_dotenv()
@@ -94,7 +95,10 @@ class AlfredHubCoordinator:
         # GUI Automation Logistics Tools
         self.gui_logistics = GuiAutomationLogistics()
 
-        # List of tools to register with Gemini Live API
+        # Browser Automation Logistics Tools
+        self.browser_logistics = BrowserAutomationLogistics()
+
+        # List of tools to register with Gemini Live API (23 total tools)
         self.tools_list = [
             self.logistics.get_system_diagnostics,
             self.logistics.launch_application_or_url,
@@ -103,6 +107,7 @@ class AlfredHubCoordinator:
             self.logistics.remember_fact,
             self.logistics.recall_context,
             self.logistics.execute_terminal_command,
+            self.logistics.deep_os_file_executive,
             self.dev_logistics.inspect_git_workspace,
             self.dev_logistics.inspect_local_dev_ports,
             self.dev_logistics.probe_network_target,
@@ -114,6 +119,10 @@ class AlfredHubCoordinator:
             self.gui_logistics.write_live_word_document,
             self.gui_logistics.visual_code_edit,
             self.gui_logistics.send_keyboard_shortcut,
+            self.gui_logistics.screen_pixel_navigation,
+            self.browser_logistics.browser_navigate_and_parse_dom,
+            self.browser_logistics.browser_interact_dom_element,
+            self.browser_logistics.browser_scroll_and_inspect,
         ]
 
         # Gemini Live Core
@@ -123,6 +132,7 @@ class AlfredHubCoordinator:
             vision_manager=self.vision,
             dev_logistics=self.dev_logistics,
             gui_logistics=self.gui_logistics,
+            browser_logistics=self.browser_logistics,
             on_status_change=self.on_status_change,
             on_active_tool_change=self.on_active_tool_change,
             on_transcript=self.on_transcript_update,
@@ -408,6 +418,7 @@ class AlfredHubCoordinator:
             self._fallback_task.cancel()
 
         await self.live_core.stop()
+        await self.browser_logistics.close()
         self.memory.close()
 
 
