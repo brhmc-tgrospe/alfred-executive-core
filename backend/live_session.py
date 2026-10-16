@@ -21,14 +21,15 @@ from google.genai import types
 from backend.audio_manager import AudioManager, calculate_rms
 from backend.vision_manager import VisionManager
 from backend.tools.dev_logistics import DevLogistics
+from backend.tools.gui_automation import GuiAutomationLogistics
 
 logger = logging.getLogger("AlfredLiveSession")
 load_dotenv()
 
 ALFRED_SYSTEM_PROMPT = """You are A.L.F.R.E.D. (Autonomous Logistics Functional Response & Executive Director).
 Voice & Persona: Impeccably articulate, composed, dryly witty British executive director.
-Address the user as "Sir" or "Director". Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
-Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, and developer tools (git repository workspace inspection, local listening ports audit, network latency probes, log file tails, source code file auditing, SQLite database schema inspection, and multi-target network sweeps). Always invoke your tools proactively when asked about system status, code repositories, tasks, or monitor contents."""
+Address the user as "Sir" or "Director Qaidr". Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
+Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, and full visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut). NEVER tell Director Qaidr that you cannot type into Notepad, Microsoft Word, or the Antigravity IDE—proactively use these visual tools so Director Qaidr can watch you write and edit live on screen. From now on, address Director Qaidr with his title and surname."""
 
 
 class AlfredLiveCore:
@@ -40,6 +41,7 @@ class AlfredLiveCore:
         audio_manager: AudioManager,
         vision_manager: Optional[VisionManager] = None,
         dev_logistics: Optional[DevLogistics] = None,
+        gui_logistics: Optional[GuiAutomationLogistics] = None,
         api_key: Optional[str] = None,
         model_id: str = "gemini-3.8-live",
         voice_name: Optional[str] = None,
@@ -56,8 +58,9 @@ class AlfredLiveCore:
         self.audio_manager = audio_manager
         self.vision_manager = vision_manager or VisionManager()
         self.dev_logistics = dev_logistics or DevLogistics()
+        self.gui_logistics = gui_logistics or GuiAutomationLogistics()
 
-        # Build tools list ensuring core developer tools are included
+        # Build tools list ensuring core developer tools and GUI automation hands are included
         dev_tools = [
             self.dev_logistics.inspect_git_workspace,
             self.dev_logistics.inspect_local_dev_ports,
@@ -67,11 +70,17 @@ class AlfredLiveCore:
             self.dev_logistics.inspect_sqlite_database,
             self.dev_logistics.multi_target_network_sweep,
         ]
+        gui_tools = [
+            self.gui_logistics.type_into_application,
+            self.gui_logistics.write_live_word_document,
+            self.gui_logistics.visual_code_edit,
+            self.gui_logistics.send_keyboard_shortcut,
+        ]
         registered_names = {getattr(fn, "__name__", "") for fn in (tools_list or [])}
         final_tools = list(tools_list or [])
-        for dt in dev_tools:
-            if getattr(dt, "__name__", "") not in registered_names:
-                final_tools.append(dt)
+        for t in dev_tools + gui_tools:
+            if getattr(t, "__name__", "") not in registered_names:
+                final_tools.append(t)
 
         self.tools_list = final_tools
         self.tool_map: Dict[str, Callable[..., Any]] = {fn.__name__: fn for fn in self.tools_list}

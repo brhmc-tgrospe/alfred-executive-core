@@ -8,6 +8,7 @@ from google.genai import types
 from backend.memory.memory_store import MemoryStore
 from backend.tools.os_logistics import OSLogistics
 from backend.tools.dev_logistics import DevLogistics
+from backend.tools.gui_automation import GuiAutomationLogistics
 
 
 def test_gemini_tool_declaration_parsing(tmp_path):
@@ -16,8 +17,9 @@ def test_gemini_tool_declaration_parsing(tmp_path):
     mem = MemoryStore(db_path=db_file, chroma_dir=chroma_dir)
     logistics = OSLogistics(memory_store=mem, approval_timeout=1.0)
     dev = DevLogistics()
+    gui = GuiAutomationLogistics()
 
-    # Exposed tool functions for Gemini Live API
+    # Exposed tool functions for Gemini Live API (7 OS + 7 Dev + 4 GUI = 18 tools)
     tools_list = [
         logistics.get_system_diagnostics,
         logistics.launch_application_or_url,
@@ -33,6 +35,10 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         dev.audit_source_file,
         dev.inspect_sqlite_database,
         dev.multi_target_network_sweep,
+        gui.type_into_application,
+        gui.write_live_word_document,
+        gui.visual_code_edit,
+        gui.send_keyboard_shortcut,
     ]
 
     # Verify functions have valid docstrings and strict type hints
@@ -54,6 +60,6 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         tools=tools_list,
     )
     assert config is not None
-    assert len(config.tools) == 14
+    assert len(config.tools) == 18
 
     mem.close()

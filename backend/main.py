@@ -27,6 +27,7 @@ from backend.vision_manager import VisionManager
 from backend.memory.memory_store import MemoryStore
 from backend.tools.os_logistics import OSLogistics
 from backend.tools.dev_logistics import DevLogistics
+from backend.tools.gui_automation import GuiAutomationLogistics
 from backend.live_session import AlfredLiveCore
 
 load_dotenv()
@@ -90,6 +91,9 @@ class AlfredHubCoordinator:
         # Developer Logistics Tools
         self.dev_logistics = DevLogistics()
 
+        # GUI Automation Logistics Tools
+        self.gui_logistics = GuiAutomationLogistics()
+
         # List of tools to register with Gemini Live API
         self.tools_list = [
             self.logistics.get_system_diagnostics,
@@ -106,6 +110,10 @@ class AlfredHubCoordinator:
             self.dev_logistics.audit_source_file,
             self.dev_logistics.inspect_sqlite_database,
             self.dev_logistics.multi_target_network_sweep,
+            self.gui_logistics.type_into_application,
+            self.gui_logistics.write_live_word_document,
+            self.gui_logistics.visual_code_edit,
+            self.gui_logistics.send_keyboard_shortcut,
         ]
 
         # Gemini Live Core
@@ -114,6 +122,7 @@ class AlfredHubCoordinator:
             audio_manager=self.audio,
             vision_manager=self.vision,
             dev_logistics=self.dev_logistics,
+            gui_logistics=self.gui_logistics,
             on_status_change=self.on_status_change,
             on_active_tool_change=self.on_active_tool_change,
             on_transcript=self.on_transcript_update,
