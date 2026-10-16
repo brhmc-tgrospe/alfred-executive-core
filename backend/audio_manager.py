@@ -204,13 +204,6 @@ class AudioManager:
         if not self.is_running or self._loop is None or self._loop.is_closed():
             return
 
-        # Strict Half-Duplex Speaker Lock: completely mute mic capture & visualization during playback + 450ms cooldown
-        if self.is_speaker_locked():
-            self.current_mic_rms = 0.0
-            self.mic_rms_peak = 0.0
-            self.visual_mic_level = 0.0
-            return
-
         try:
             raw_bytes = indata.tobytes() if hasattr(indata, "tobytes") else bytes(indata)
 
@@ -225,9 +218,12 @@ class AudioManager:
             rms = calculate_rms(pcm_bytes)
             # Scaled RMS curve (x2.0) for responsive HUD visualizer display (0.10 to 0.80 range)
             self.current_mic_rms = min(1.0, float(round(rms * 2.0, 4)))
+            # ALWAYS compute mic_rms_peak and visual_mic_level on every incoming frame
+            # so the HUD LVL % bar ALWAYS shows Director Qadir's real-time hardware mic level!
             self.update_mic_levels(rms)
 
-            if self.should_stream_mic(rms):
+            # Strict Half-Duplex Speaker Lock: ONLY gate pushing audio chunks into mic_queue for Gemini while speaking
+            if not self.is_speaker_locked() and self.should_stream_mic(rms):
                 self._loop.call_soon_threadsafe(self.mic_queue.put_nowait, pcm_bytes)
         except Exception:
             pass
@@ -243,28 +239,31 @@ class AudioManager:
             self.underflow_count += 1
 
         with self._playback_lock:
-            # 1. Jitter Pre-buffering: wait until 120ms of audio has arrived before starting
+            buf_len = len(self._playback_buffer)
+
+            # 1. Buffer exhausted: output silence, reset prebuffering & turn flag
+            # CRITICAL: NEVER update self._last_playback_time when buffer is empty!
+            if buf_len == 0:
+                outdata[:] = b"\x00" * needed
+                self.current_speaker_rms = 0.0
+                self.is_playing = False
+                self._prebuffering = True
+                self._turn_complete = False
+                return
+
+            # 2. Jitter Pre-buffering: wait until 120ms of audio has arrived or turn is explicitly complete
             if self._prebuffering:
-                if len(self._playback_buffer) >= self.jitter_prebuffer_bytes or self._turn_complete:
+                if buf_len >= self.jitter_prebuffer_bytes or self._turn_complete:
                     self._prebuffering = False
                     self.is_playing = True
-                    self._last_playback_time = time.time()
                 else:
                     outdata[:] = b"\x00" * needed
                     self.current_speaker_rms = 0.0
                     return
 
-            buf_len = len(self._playback_buffer)
-            # 2. Buffer exhausted: output silence, reset prebuffering
-            if buf_len == 0:
-                outdata[:] = b"\x00" * needed
-                self._prebuffering = True
-                self.is_playing = False
-                self.current_speaker_rms = 0.0
-                return
-
             self.is_playing = True
-            # 3. Continuous FIFO Slicing
+
+            # 3. Continuous FIFO Slicing: only update self._last_playback_time when actual audio bytes are being consumed!
             if buf_len >= needed:
                 outdata[:] = self._playback_buffer[:needed]
                 del self._playback_buffer[:needed]
@@ -274,11 +273,12 @@ class AudioManager:
                 except Exception:
                     pass
             else:
-                # Partial block remaining at end of turn
+                # Partial block remaining at end of turn (buf_len > 0)
                 outdata[:buf_len] = self._playback_buffer[:buf_len]
                 outdata[buf_len:] = b"\x00" * (needed - buf_len)
                 self._playback_buffer.clear()
                 self._prebuffering = True
+                self._turn_complete = False
                 self.is_playing = False
                 self._last_playback_time = time.time()
                 try:
@@ -291,15 +291,30 @@ class AudioManager:
         """Lists available sounddevice audio input devices filtered for clean, physically active microphones.
 
         Filters out virtual mappers, loopbacks, kernel drivers, and disconnected devices.
-        Prefers a single Windows Host API (MME or WASAPI) and deduplicates by normalized name.
+        Restricts strictly to the Windows default Host API (sd.default.hostapi) so secondary/muted driver endpoints are ignored.
+        Always includes 'System Default Microphone' at the top of the list.
         """
         if sd is None:
             return []
         devices: List[Dict[str, Any]] = []
         try:
             all_devs = sd.query_devices()
-            host_apis = {i: h.get("name", "") for i, h in enumerate(sd.query_hostapis())}
             default_in = sd.default.device[0] if hasattr(sd.default, "device") else -1
+            if default_in >= 0 and default_in < len(all_devs):
+                default_hostapi = all_devs[default_in].get("hostapi", getattr(sd.default, "hostapi", 0))
+            else:
+                try:
+                    default_hostapi = getattr(sd.default, "hostapi", 0)
+                except Exception:
+                    default_hostapi = 0
+
+            # System Default Microphone at the top
+            devices.append({
+                "id": -1,
+                "name": "System Default Microphone",
+                "channels": 1,
+                "is_default": (self.current_device_id is None or self.current_device_id < 0),
+            })
 
             banned_keywords = [
                 "sound mapper",
@@ -315,6 +330,11 @@ class AudioManager:
             for idx, dev in enumerate(all_devs):
                 if dev.get("max_input_channels", 0) <= 0:
                     continue
+
+                # Restrict strictly to the default Windows Host API
+                if dev.get("hostapi", -1) != default_hostapi:
+                    continue
+
                 raw_name = str(dev.get("name", f"Microphone {idx}")).strip()
                 lower_name = raw_name.lower()
 
@@ -332,41 +352,16 @@ class AudioManager:
                 except Exception:
                     continue
 
-                host_api = host_apis.get(dev.get("hostapi", -1), "")
                 valid_candidates.append({
                     "id": idx,
                     "name": raw_name,
-                    "host_api": host_api,
                     "channels": dev.get("max_input_channels", 1),
-                    "is_default": (idx == default_in),
+                    "is_default": (self.current_device_id == idx) if self.current_device_id is not None else False,
                 })
-
-            if not valid_candidates:
-                return []
-
-            # Determine preferred host API: prioritize host API of default device, then MME, DirectSound, WASAPI
-            default_api = None
-            for c in valid_candidates:
-                if c["is_default"]:
-                    default_api = c["host_api"]
-                    break
-
-            preferred_order = [default_api, "MME", "Windows DirectSound", "Windows WASAPI"]
-            preferred_order = [api for api in preferred_order if api]
-
-            chosen_candidates: List[Dict[str, Any]] = []
-            for p_api in preferred_order:
-                matching = [c for c in valid_candidates if c["host_api"] == p_api]
-                if matching:
-                    chosen_candidates = matching
-                    break
-
-            if not chosen_candidates:
-                chosen_candidates = valid_candidates
 
             # Deduplicate by normalized name and clean formatting
             seen_keys: set = set()
-            for c in chosen_candidates:
+            for c in valid_candidates:
                 name = c["name"].replace("\xae", "").replace("\ufffd", "").strip()
                 # Remove unprintable / non-ascii artifacts
                 name = re.sub(r"[^\x20-\x7E]", "", name).strip()
@@ -398,7 +393,7 @@ class AudioManager:
             return False
         try:
             dev_idx = int(device_id)
-            self.current_device_id = dev_idx
+            self.current_device_id = None if dev_idx < 0 else dev_idx
 
             if self.is_running and self._input_stream is not None:
                 self._input_stream.stop()
@@ -406,7 +401,7 @@ class AudioManager:
                 self._input_stream = None
 
                 self._input_stream = sd.InputStream(
-                    device=dev_idx,
+                    device=self.current_device_id,
                     samplerate=self.input_sample_rate,
                     channels=self.channels,
                     dtype="int16",
@@ -414,7 +409,7 @@ class AudioManager:
                     blocksize=512,
                 )
                 self._input_stream.start()
-                logger.info("[AudioManager] Successfully switched mic device to ID %s", dev_idx)
+                logger.info("[AudioManager] Successfully switched mic device to %s", self.current_device_id)
             return True
         except Exception as e:
             logger.error("[AudioManager] Failed to switch mic input device to %s: %s", device_id, e)
@@ -442,7 +437,7 @@ class AudioManager:
 
         if sd is not None:
             try:
-                # 1. Microphone Input Stream
+                # 1. Microphone Input Stream (opens Windows System Default input device when current_device_id is None)
                 stream_kwargs: Dict[str, Any] = {
                     "samplerate": self.input_sample_rate,
                     "channels": self.channels,
@@ -450,8 +445,10 @@ class AudioManager:
                     "callback": self._input_callback,
                     "blocksize": 512,
                 }
-                if self.current_device_id is not None:
+                if self.current_device_id is not None and self.current_device_id >= 0:
                     stream_kwargs["device"] = self.current_device_id
+                else:
+                    stream_kwargs["device"] = None
 
                 self._input_stream = sd.InputStream(**stream_kwargs)
                 self._input_stream.start()

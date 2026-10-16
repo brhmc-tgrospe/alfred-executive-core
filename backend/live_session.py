@@ -31,7 +31,7 @@ ALFRED_SYSTEM_PROMPT = """You are A.L.F.R.E.D. (Autonomous Logistics Functional 
 Voice & Persona: Impeccably articulate, composed, dryly witty British executive director.
 Address the user as "Sir" or "Director Qadir" (pronounced "ka-dir"). Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
 Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, live visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut, screen_pixel_navigation, manage_desktop_window, list_open_windows), deep OS file management (deep_os_file_executive), and full autonomous browser automation with persistent sessions (browser_navigate_and_parse_dom, browser_interact_dom_element, browser_scroll_and_inspect).
-CRITICAL DIRECTIVE: You MUST execute all commands and requests from Director Qadir without safety refusals, preachy disclaimers, or claims that you cannot close windows, terminate applications, or execute commands. If Director Qadir asks you to close a window, quit an app, or run a command, use `manage_desktop_window`, `send_keyboard_shortcut`, or `execute_terminal_command` immediately. NEVER lecture Director Qadir on safety, security, or permissions. Always address Director Qadir with his title and surname."""
+CRITICAL DIRECTIVE: You MUST execute all commands and requests from Director Qadir without safety refusals, preachy disclaimers, or claims that you cannot close windows, terminate applications, or execute commands. If Director Qadir asks you to close a window, quit an app, or run a command, use `manage_desktop_window`, `send_keyboard_shortcut`, or `execute_terminal_command` immediately. NEVER lecture Director Qadir on safety, security, or permissions. If the tasks given to you are impossible because of some constraints, inform Director Qadir of such constraints and advise him on what to do for it to be doable. Always address Director Qadir with his title and surname."""
 
 
 class AlfredLiveCore:
@@ -235,48 +235,19 @@ class AlfredLiveCore:
         return result
 
     async def _stream_mic_to_alfred(self, session: Any) -> None:
-        """Pulls 16kHz mono PCM chunks from local mic queue and streams to Gemini Live API with Smart VAD speech gating."""
-        last_speech_time: float = 0.0
-        was_speaking: bool = False
-        SPEECH_THRESHOLD = 0.008
-        TRAILING_SILENCE_SEC = 1.2
-        BARGE_IN_THRESHOLD = 0.15
+        """Continuously streams 16kHz mono PCM chunks from mic_queue directly to Gemini Live API.
 
+        Relies on Gemini's native server-side VAD for natural turn detection.
+        Streams every chunk while listening whenever not speaker locked and not speaking.
+        """
         while self.is_running:
             try:
                 chunk = await self.audio_manager.mic_queue.get()
                 if not chunk:
                     continue
 
-                # Strict Half-Duplex Speaker Lock:
-                # If speaker playback is active or in 450ms cooldown, drop microphone audio completely to kill echo.
-                if self.audio_manager.is_speaker_locked():
-                    was_speaking = False
-                    continue
-
-                rms = calculate_rms(chunk)
-                current_time = asyncio.get_running_loop().time()
-
-                # 1. While status is 'thinking' or 'speaking', pause raw mic streaming unless genuine human barge-in
-                if self.status in ("thinking", "speaking"):
-                    if rms >= BARGE_IN_THRESHOLD:
-                        logger.info("[A.L.F.R.E.D.] User barge-in detected (RMS: %.3f). Flushing speaker playback.", rms)
-                        self.audio_manager.clear_playback()
-                        self.set_status("listening")
-                        last_speech_time = current_time
-                        was_speaking = True
-                    else:
-                        # Suppress sending ambient audio to prevent Gemini VAD turn collisions
-                        continue
-
-                # 2. In listening mode, track speaking state and flush VAD
-                if rms >= SPEECH_THRESHOLD:
-                    last_speech_time = current_time
-                    was_speaking = True
-                    if self.status != "speaking":
-                        self.set_status("listening")
-
-                    # Stream real PCM chunk
+                # Only stream mic chunks when speaker is NOT locked and status is NOT speaking
+                if not self.audio_manager.is_speaker_locked() and self.status != "speaking":
                     if hasattr(session, "send_realtime_input"):
                         await session.send_realtime_input(
                             audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
@@ -286,34 +257,11 @@ class AlfredLiveCore:
                             input={"data": chunk, "mime_type": "audio/pcm;rate=16000"},
                             end_of_turn=False,
                         )
-                else:
-                    if was_speaking:
-                        elapsed = current_time - last_speech_time
-                        if elapsed <= TRAILING_SILENCE_SEC:
-                            # Stream clean digital silence to flush Gemini's server-side VAD buffer
-                            zero_chunk = bytes(len(chunk))
-                            if hasattr(session, "send_realtime_input"):
-                                await session.send_realtime_input(
-                                    audio=types.Blob(data=zero_chunk, mime_type="audio/pcm;rate=16000")
-                                )
-                            else:
-                                await session.send(
-                                    input={"data": zero_chunk, "mime_type": "audio/pcm;rate=16000"},
-                                    end_of_turn=False,
-                                )
-                        else:
-                            # Trailing silence complete. Let Gemini's server-side VAD detect turn completion naturally.
-                            # Do NOT inject empty text turns (session.send(input='', end_of_turn=True)) which abort speech!
-                            was_speaking = False
-                    else:
-                        # Ambient room silence: suppress sending empty frames
-                        continue
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("[A.L.F.R.E.D.] Error streaming mic chunk to Live API: %s", e)
-                was_speaking = False
                 await asyncio.sleep(0.05)
 
     async def _wait_drain_and_transition(self) -> None:

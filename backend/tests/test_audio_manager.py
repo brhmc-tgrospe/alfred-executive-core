@@ -145,12 +145,76 @@ def test_list_input_devices_filtering_and_deduplication(monkeypatch):
     for banned in ["Sound Mapper", "Primary Sound", "Stereo Mix", "PC Speaker", "@System32", "()"]:
         assert not any(banned.lower() in n.lower() for n in names)
 
-    # Verify clean physical devices are present and deduplicated
-    assert len(devices) == 2
+    # Verify System Default Microphone is at the top
+    assert devices[0]["name"] == "System Default Microphone"
+    assert devices[0]["id"] == -1
+    assert devices[0]["is_default"] is True
+
+    # Verify clean physical devices are present and deduplicated (3 total: Default + 2 physical)
+    assert len(devices) == 3
     assert any("Microphone Array" in n for n in names)
     assert any("Headset (ERAZER XF55)" in n for n in names)
-    # Check default flag
-    default_dev = [d for d in devices if d["is_default"]]
-    assert len(default_dev) == 1
-    assert default_dev[0]["id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_speaker_lock_releases_when_output_buffer_empty():
+    """Verify that after feeding audio and draining it via _output_callback,
+    idle _output_callback ticks do NOT refresh _last_playback_time.
+    After 500ms, is_speaker_locked() releases (becomes False),
+    and _input_callback produces visual_mic_level > 0.30 and pushes chunks to mic_queue.
+    Also verifies visual_mic_level is never forced to 0.0 even while locked.
+    """
+    import asyncio
+    mgr = AudioManager()
+    mgr.is_running = True
+    mgr._loop = asyncio.get_running_loop()
+
+    # 1. Feed audio into playback buffer
+    test_audio = b"\x20\x00" * 512  # 1024 bytes
+    mgr.feed_speaker_audio(test_audio)
+    mgr.mark_turn_complete()
+    assert mgr.is_speaker_locked() is True
+
+    # 2. Drain buffer via _output_callback
+    outdata = bytearray(1024)
+    mgr._output_callback(outdata, 512, None, None)
+    # Playback buffer is now empty (len == 0)
+    with mgr._playback_lock:
+        assert len(mgr._playback_buffer) == 0
+
+    # 3. Simulate idle _output_callback ticks while empty
+    idle_outdata = bytearray(1024)
+    mgr._output_callback(idle_outdata, 512, None, None)
+
+    # 4. Advance time past the 450ms cooldown (500ms)
+    mgr._last_playback_time -= 0.50
+
+    # Simulate additional idle _output_callback ticks (regression check: MUST NOT reset _last_playback_time!)
+    for _ in range(5):
+        mgr._output_callback(idle_outdata, 512, None, None)
+
+    # Assert speaker lock has released!
+    assert mgr.is_speaker_locked() is False
+
+    # 5. Simulate microphone input arriving (typical speech level: sample value 128 -> ~0.010 RMS)
+    raw_mic = b"\x80\x00" * 256
+    mgr._input_callback(raw_mic, 256, None, None)
+    await asyncio.sleep(0.01)
+
+    # Assert visual_mic_level is active (> 0.30) and chunk was pushed to mic_queue
+    assert mgr.visual_mic_level > 0.30
+    assert not mgr.mic_queue.empty()
+    queued_chunk = mgr.mic_queue.get_nowait()
+    assert len(queued_chunk) > 0
+
+    # 6. Verify that even if speaker lock is active, visual_mic_level STILL responds to real mic!
+    mgr.feed_speaker_audio(test_audio)
+    assert mgr.is_speaker_locked() is True
+    mgr._input_callback(raw_mic, 256, None, None)
+    await asyncio.sleep(0.01)
+    # Visual level still tracks real hardware mic (> 0.30):
+    assert mgr.visual_mic_level > 0.30
+    # But chunk is NOT pushed to Gemini mic_queue while speaker is locked:
+    assert mgr.mic_queue.empty()
+
 
