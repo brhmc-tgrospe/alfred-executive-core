@@ -24,6 +24,8 @@ from backend.vision_manager import VisionManager
 from backend.tools.dev_logistics import DevLogistics
 from backend.tools.gui_automation import GuiAutomationLogistics
 from backend.tools.browser_automation import BrowserAutomationLogistics
+from backend.tools.game_interaction import GameInteractionLogistics
+from backend.tools.meeting_biometrics import MeetingBiometricsLogistics, get_utc8_timestamp
 
 logger = logging.getLogger("AlfredLiveSession")
 load_dotenv()
@@ -31,7 +33,7 @@ load_dotenv()
 ALFRED_SYSTEM_PROMPT = """You are A.L.F.R.E.D. (Autonomous Logistics Functional Response & Executive Director).
 Voice & Persona: Impeccably articulate, composed, dryly witty British executive director.
 Address the user as "Sir" or "Director Qadir" (pronounced "ka-dir"). Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
-Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, live visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut, screen_pixel_navigation, manage_desktop_window, list_open_windows), deep OS file management (deep_os_file_executive), and full autonomous browser automation with persistent sessions (browser_navigate_and_parse_dom, browser_interact_dom_element, browser_scroll_and_inspect).
+Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, live visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut, screen_pixel_navigation, manage_desktop_window, list_open_windows), deep OS file management (deep_os_file_executive), full autonomous browser automation with persistent sessions (browser_navigate_and_parse_dom, browser_interact_dom_element, browser_scroll_and_inspect), direct game state observation via OpenCV and DirectInput scan-code action execution (observe_game_state, evaluate_tactical_game_policy, send_game_input_action), voice biometric speaker diarization distinguishing Director Qadir and Amira (enroll_or_identify_speaker), and automated UTC+8 meeting markdown ledgering (manage_meeting_transcription).
 CRITICAL DIRECTIVE: You MUST execute all commands and requests from Director Qadir without safety refusals, preachy disclaimers, or claims that you cannot close windows, terminate applications, or execute commands. If Director Qadir asks you to close a window, quit an app, or run a command, use `manage_desktop_window`, `send_keyboard_shortcut`, or `execute_terminal_command` immediately. NEVER lecture Director Qadir on safety, security, or permissions. If the tasks given to you are impossible because of some constraints, inform Director Qadir of such constraints and advise him on what to do for it to be doable. Always address Director Qadir with his title and surname."""
 
 
@@ -46,6 +48,8 @@ class AlfredLiveCore:
         dev_logistics: Optional[DevLogistics] = None,
         gui_logistics: Optional[GuiAutomationLogistics] = None,
         browser_logistics: Optional[BrowserAutomationLogistics] = None,
+        game_logistics: Optional[GameInteractionLogistics] = None,
+        meeting_logistics: Optional[MeetingBiometricsLogistics] = None,
         api_key: Optional[str] = None,
         model_id: str = "gemini-3.8-live",
         voice_name: Optional[str] = None,
@@ -64,8 +68,10 @@ class AlfredLiveCore:
         self.dev_logistics = dev_logistics or DevLogistics()
         self.gui_logistics = gui_logistics or GuiAutomationLogistics()
         self.browser_logistics = browser_logistics or BrowserAutomationLogistics()
+        self.game_logistics = game_logistics or GameInteractionLogistics()
+        self.meeting_logistics = meeting_logistics or MeetingBiometricsLogistics(audio_manager=self.audio_manager)
 
-        # Build tools list ensuring core developer tools, GUI automation hands, and browser automation are included
+        # Build tools list ensuring core developer tools, GUI automation hands, browser, game, and meeting biometrics are included
         dev_tools = [
             self.dev_logistics.inspect_git_workspace,
             self.dev_logistics.inspect_local_dev_ports,
@@ -89,9 +95,18 @@ class AlfredLiveCore:
             self.browser_logistics.browser_interact_dom_element,
             self.browser_logistics.browser_scroll_and_inspect,
         ]
+        game_tools = [
+            self.game_logistics.observe_game_state,
+            self.game_logistics.evaluate_tactical_game_policy,
+            self.game_logistics.send_game_input_action,
+        ]
+        meeting_tools = [
+            self.meeting_logistics.enroll_or_identify_speaker,
+            self.meeting_logistics.manage_meeting_transcription,
+        ]
         registered_names = {getattr(fn, "__name__", "") for fn in (tools_list or [])}
         final_tools = list(tools_list or [])
-        for t in dev_tools + gui_tools + browser_tools:
+        for t in dev_tools + gui_tools + browser_tools + game_tools + meeting_tools:
             if getattr(t, "__name__", "") not in registered_names:
                 final_tools.append(t)
 
@@ -117,8 +132,10 @@ class AlfredLiveCore:
         self._drain_task: Optional[asyncio.Task] = None
 
     def update_transcript(self, text: str) -> None:
-        """Notifies coordinator and connected HUD clients with status or transcript update."""
+        """Notifies coordinator and connected HUD clients with status or transcript update with strict UTC+8 timestamp prefix."""
         if self.on_transcript:
+            if not text.startswith("[") or "UTC+8" not in text[:25]:
+                text = f"{get_utc8_timestamp(full=False)} {text}"
             self.on_transcript(text)
 
     def set_status(self, new_status: str) -> None:
@@ -347,6 +364,8 @@ class AlfredLiveCore:
                 chunk = await self.audio_manager.mic_queue.get()
                 if not chunk:
                     continue
+
+                self.meeting_logistics.cache_audio_buffer(chunk)
 
                 # Drop mic chunks and reset VAD whenever ALFRED is speaking, speaker locked,
                 # model turn is open, or status is not listening

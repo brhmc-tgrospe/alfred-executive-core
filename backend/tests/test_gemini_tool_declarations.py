@@ -10,6 +10,8 @@ from backend.tools.os_logistics import OSLogistics
 from backend.tools.dev_logistics import DevLogistics
 from backend.tools.gui_automation import GuiAutomationLogistics
 from backend.tools.browser_automation import BrowserAutomationLogistics
+from backend.tools.game_interaction import GameInteractionLogistics
+from backend.tools.meeting_biometrics import MeetingBiometricsLogistics
 
 
 def test_gemini_tool_declaration_parsing(tmp_path):
@@ -20,8 +22,10 @@ def test_gemini_tool_declaration_parsing(tmp_path):
     dev = DevLogistics()
     gui = GuiAutomationLogistics()
     browser = BrowserAutomationLogistics(profile_dir=str(tmp_path / "browser_profile"))
+    game = GameInteractionLogistics()
+    meeting = MeetingBiometricsLogistics(meetings_dir=str(tmp_path / "meetings"))
 
-    # Exposed tool functions for Gemini Live API (8 OS + 7 Dev + 7 GUI + 3 Browser = 25 tools)
+    # Exposed tool functions for Gemini Live API (8 OS + 7 Dev + 7 GUI + 3 Browser + 3 Game + 2 Meeting = 30 tools)
     tools_list = [
         logistics.get_system_diagnostics,
         logistics.launch_application_or_url,
@@ -48,6 +52,11 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         browser.browser_navigate_and_parse_dom,
         browser.browser_interact_dom_element,
         browser.browser_scroll_and_inspect,
+        game.observe_game_state,
+        game.evaluate_tactical_game_policy,
+        game.send_game_input_action,
+        meeting.enroll_or_identify_speaker,
+        meeting.manage_meeting_transcription,
     ]
 
     # Verify functions have valid docstrings and strict type hints
@@ -69,6 +78,6 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         tools=tools_list,
     )
     assert config is not None
-    assert len(config.tools) == 25
+    assert len(config.tools) == 30
 
     mem.close()

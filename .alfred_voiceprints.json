@@ -1,0 +1,14 @@
+{
+  "Director Qadir": {
+    "f0_hz": 115.0,
+    "spectral_centroid_hz": 1250.0,
+    "spectral_rolloff_hz": 2300.0,
+    "zcr": 0.045
+  },
+  "Amira": {
+    "f0_hz": 225.0,
+    "spectral_centroid_hz": 2150.0,
+    "spectral_rolloff_hz": 3700.0,
+    "zcr": 0.088
+  }
+}

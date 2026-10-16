@@ -26,3 +26,5 @@ build/
 .DS_Store
 Thumbs.db
 .alfred_browser_profile/
+chroma_data/
+backend/memory/chroma_data/

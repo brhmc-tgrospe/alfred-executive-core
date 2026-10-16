@@ -29,6 +29,8 @@ from backend.tools.os_logistics import OSLogistics
 from backend.tools.dev_logistics import DevLogistics
 from backend.tools.gui_automation import GuiAutomationLogistics
 from backend.tools.browser_automation import BrowserAutomationLogistics
+from backend.tools.game_interaction import GameInteractionLogistics
+from backend.tools.meeting_biometrics import MeetingBiometricsLogistics, get_utc8_timestamp
 from backend.live_session import AlfredLiveCore
 
 load_dotenv()
@@ -98,7 +100,13 @@ class AlfredHubCoordinator:
         # Browser Automation Logistics Tools
         self.browser_logistics = BrowserAutomationLogistics()
 
-        # List of tools to register with Gemini Live API (25 total tools)
+        # Game Interaction Logistics Tools
+        self.game_logistics = GameInteractionLogistics()
+
+        # Meeting Biometrics Logistics Tools
+        self.meeting_logistics = MeetingBiometricsLogistics(audio_manager=self.audio)
+
+        # List of tools to register with Gemini Live API (30 total tools)
         self.tools_list = [
             self.logistics.get_system_diagnostics,
             self.logistics.launch_application_or_url,
@@ -125,6 +133,11 @@ class AlfredHubCoordinator:
             self.browser_logistics.browser_navigate_and_parse_dom,
             self.browser_logistics.browser_interact_dom_element,
             self.browser_logistics.browser_scroll_and_inspect,
+            self.game_logistics.observe_game_state,
+            self.game_logistics.evaluate_tactical_game_policy,
+            self.game_logistics.send_game_input_action,
+            self.meeting_logistics.enroll_or_identify_speaker,
+            self.meeting_logistics.manage_meeting_transcription,
         ]
 
         # Gemini Live Core
@@ -135,6 +148,8 @@ class AlfredHubCoordinator:
             dev_logistics=self.dev_logistics,
             gui_logistics=self.gui_logistics,
             browser_logistics=self.browser_logistics,
+            game_logistics=self.game_logistics,
+            meeting_logistics=self.meeting_logistics,
             on_status_change=self.on_status_change,
             on_active_tool_change=self.on_active_tool_change,
             on_transcript=self.on_transcript_update,
@@ -169,7 +184,9 @@ class AlfredHubCoordinator:
         logger.debug("Active tool: %s", tool_name)
 
     def on_transcript_update(self, text: str) -> None:
-        """Updates scrolling transcript."""
+        """Updates scrolling transcript with strict UTC+8 timestamp prefix."""
+        if not text.startswith("[") or "UTC+8" not in text[:25]:
+            text = f"{get_utc8_timestamp(full=False)} {text}"
         self.current_transcript = text
 
     def get_state_payload(self) -> dict:
