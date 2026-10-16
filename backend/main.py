@@ -113,6 +113,7 @@ class AlfredHubCoordinator:
             on_status_change=self.on_status_change,
             on_active_tool_change=self.on_active_tool_change,
             on_transcript=self.on_transcript_update,
+            on_thinking_timeout=self._execute_fallback_prompt,
         )
 
         # Direct aliases for clear architectural access
@@ -248,19 +249,20 @@ class AlfredHubCoordinator:
 
         lower = text.lower()
         if "status" in lower or "report" in lower:
-            diag = self.logistics.get_system_diagnostics()
-            response = f"Systems nominal, Sir. CPU load is at {diag.get('cpu_usage_percent')}%, memory consumption at {diag.get('ram_usage_percent')}%. Executive logistics core is fully operational."
+            response = f"Systems nominal, Sir. CPU load is at {self.cached_cpu}%, memory consumption at {self.cached_ram}%. Executive logistics core is fully operational."
         elif "diagnostic" in lower or "telemetry" in lower or "system" in lower:
-            diag = self.logistics.get_system_diagnostics()
-            response = f"Diagnostics complete. OS: {diag.get('platform')}, Python: {diag.get('python_version')}, Disk: {diag.get('disk_usage_percent')}%. All secondary buffers operational."
+            response = f"Diagnostics complete. CPU: {self.cached_cpu}%, RAM: {self.cached_ram}%. All secondary buffers operational."
         elif "screen" in lower or "inspect" in lower or "look" in lower:
-            screen_res = self.logistics.inspect_active_screen()
-            response = f"Visual cortex engaged. Screen snapshot captured at {screen_res.get('width')}x{screen_res.get('height')} resolution and verified, Sir."
+            screen_res = self.logistics.inspect_active_screen("Manual inspection")
+            response = f"Visual cortex engaged. Screen snapshot captured and verified, Sir."
+        elif "port" in lower:
+            port_report = self.dev_logistics.inspect_local_dev_ports()
+            response = f"Developer ports report: {port_report}"
         elif "briefing" in lower:
-            brief = self.logistics.manage_executive_briefing(action="read")
+            brief = self.logistics.manage_executive_briefing(action="list")
             response = f"Executive briefing on record: {brief}"
         else:
-            response = f"Directive acknowledged: \"{text}\". Core logistics standing by. (Gemini Live API is currently in standby mode)."
+            response = f"Directive acknowledged: \"{text}\". Core logistics standing by, Sir."
 
         self.live_core.set_status("speaking")
         self.current_transcript = response
@@ -268,7 +270,7 @@ class AlfredHubCoordinator:
         await self.broadcast_state_packet()
         await asyncio.sleep(1.2)
         if self.live_core.status == "speaking":
-            self.live_core.set_status("idle")
+            self.live_core.set_status("listening" if self.audio.ptt_active else "idle")
             await self.broadcast_state_packet()
 
     async def handle_hud_message(self, message_data: dict) -> None:
@@ -328,10 +330,9 @@ class AlfredHubCoordinator:
             if self.live_core._session and self.live_core.is_running:
                 try:
                     logger.info("Injecting text prompt into active Live session: %s", text)
-                    self.live_core.set_status("thinking")
                     self.current_transcript = f"› Directive: \"{text}\""
                     await self.broadcast_state_packet()
-                    await self.live_core._session.send(input=text, end_of_turn=True)
+                    await self.live_core.send_text_prompt(text)
                 except Exception as e:
                     logger.warning("Failed to send prompt to Live session (%s), falling back", e)
                     await self._execute_fallback_prompt(text)

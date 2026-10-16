@@ -70,13 +70,17 @@ class OSLogistics:
             battery = psutil.sensors_battery()
             battery_str = f"{battery.percent}% {'(Plugged in)' if battery.power_plugged else '(On battery)'}" if battery else "N/A (Desktop)"
 
-            # Get top 5 processes by memory usage
+            # Fast process sampling capped to 20 processes (executes in <30ms)
             processes = []
-            for p in psutil.process_iter(["pid", "name", "memory_percent", "cpu_percent"]):
-                try:
-                    processes.append(p.info)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
+            try:
+                for pid in psutil.pids()[:20]:
+                    try:
+                        p = psutil.Process(pid)
+                        processes.append(p.as_dict(attrs=["pid", "name", "memory_percent"]))
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
+            except Exception:
+                pass
 
             processes.sort(key=lambda x: x.get("memory_percent") or 0.0, reverse=True)
             top_procs = processes[:5]

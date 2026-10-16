@@ -2,7 +2,7 @@
 
 Orchestrates real-time bidirectional audio streaming, non-blocking tool dispatching
 (awaiting coroutines and offloading sync tools to threads), visual cortex screen
-frame injection, and instant barge-in interruption.
+frame injection, smart VAD speech gating, and instant barge-in interruption.
 """
 
 from __future__ import annotations
@@ -13,11 +13,12 @@ import logging
 import os
 from typing import Any, Callable, Dict, List, Optional
 from dotenv import load_dotenv
+import psutil
 
 from google import genai
 from google.genai import types
 
-from backend.audio_manager import AudioManager
+from backend.audio_manager import AudioManager, calculate_rms
 from backend.vision_manager import VisionManager
 from backend.tools.dev_logistics import DevLogistics
 
@@ -45,6 +46,7 @@ class AlfredLiveCore:
         on_status_change: Optional[Callable[[str], None]] = None,
         on_active_tool_change: Optional[Callable[[Optional[str]], None]] = None,
         on_transcript: Optional[Callable[[str], None]] = None,
+        on_thinking_timeout: Optional[Callable[[str], Any]] = None,
     ) -> None:
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
         self.client = genai.Client(api_key=self.api_key) if self.api_key else None
@@ -75,6 +77,7 @@ class AlfredLiveCore:
         self.on_status_change = on_status_change
         self.on_active_tool_change = on_active_tool_change
         self.on_transcript = on_transcript
+        self.on_thinking_timeout = on_thinking_timeout
 
         self.status: str = "idle"  # "idle" | "listening" | "thinking" | "speaking"
         self.active_tool: Optional[str] = None
@@ -82,6 +85,7 @@ class AlfredLiveCore:
         self._loop_active: bool = False
         self._session: Any = None
         self._initial_briefing_sent: bool = False
+        self._thinking_watchdog_task: Optional[asyncio.Task] = None
 
     def update_transcript(self, text: str) -> None:
         """Notifies coordinator and connected HUD clients with status or transcript update."""
@@ -99,6 +103,51 @@ class AlfredLiveCore:
         self.active_tool = tool_name
         if self.on_active_tool_change:
             self.on_active_tool_change(tool_name)
+
+    def _arm_thinking_watchdog(self, fallback_text: str = "") -> None:
+        """Arms an 8.0-second watchdog: if status remains 'thinking' without server activity, resets to listening."""
+        self._disarm_thinking_watchdog()
+        self._thinking_watchdog_task = asyncio.create_task(self._thinking_watchdog_worker(fallback_text))
+
+    def _disarm_thinking_watchdog(self) -> None:
+        """Disarms the thinking watchdog upon receiving server audio or tool calls."""
+        if self._thinking_watchdog_task and not self._thinking_watchdog_task.done():
+            self._thinking_watchdog_task.cancel()
+        self._thinking_watchdog_task = None
+
+    async def _thinking_watchdog_worker(self, fallback_text: str) -> None:
+        """Background worker enforcing the 8.0-second REASONING limit."""
+        try:
+            await asyncio.sleep(8.0)
+            if self.status == "thinking":
+                logger.warning(
+                    "[ALFRED WATCHDOG] Thinking state timed out after 8.0s without Gemini activity for: '%s'",
+                    fallback_text,
+                )
+                self.set_status("listening")
+                if self.on_thinking_timeout:
+                    try:
+                        res = self.on_thinking_timeout(fallback_text)
+                        if inspect.isawaitable(res):
+                            await res
+                    except Exception as e:
+                        logger.error("Error executing thinking timeout callback: %s", e)
+                else:
+                    self.update_transcript(
+                        f"[Standby]: Directive '{fallback_text}' processing timed out. Standing by, Sir."
+                    )
+        except asyncio.CancelledError:
+            pass
+
+    async def send_text_prompt(self, text: str) -> None:
+        """Sends a text directive turn to the active Gemini Live session with watchdog protection."""
+        if not self._session or not self.is_running:
+            raise RuntimeError("No active Live session.")
+
+        logger.info("[ALFRED CORE] Injecting text prompt into active Live session: '%s'", text)
+        self.set_status("thinking")
+        self._arm_thinking_watchdog(fallback_text=text)
+        await self._session.send(input=text, end_of_turn=True)
 
     async def dispatch_tool_call(self, session: Any, fc: Any) -> Any:
         """Dispatches Gemini function calls non-blockingly.
@@ -162,15 +211,44 @@ class AlfredLiveCore:
         return result
 
     async def _stream_mic_to_alfred(self, session: Any) -> None:
-        """Pulls 16kHz mono PCM chunks from local mic queue and streams to Gemini Live API."""
+        """Pulls 16kHz mono PCM chunks from local mic queue and streams to Gemini Live API with Smart VAD speech gating."""
+        last_speech_time: float = 0.0
+        SPEECH_THRESHOLD = 0.015
+        TRAILING_SILENCE_SEC = 1.2
+        BARGE_IN_THRESHOLD = 0.15
+
         while self.is_running:
             try:
                 chunk = await self.audio_manager.mic_queue.get()
                 if not chunk:
                     continue
 
-                if self.status != "speaking":
-                    self.set_status("listening")
+                rms = calculate_rms(chunk)
+                current_time = asyncio.get_running_loop().time()
+
+                # 1. While status is 'thinking' or 'speaking', pause raw mic streaming unless high barge-in
+                if self.status in ("thinking", "speaking"):
+                    if rms >= BARGE_IN_THRESHOLD:
+                        logger.info("[A.L.F.R.E.D.] User barge-in detected (RMS: %.3f). Flushing speaker playback.", rms)
+                        self.audio_manager.clear_playback()
+                        self.set_status("listening")
+                        last_speech_time = current_time
+                    else:
+                        # Suppress sending ambient audio to prevent Gemini VAD turn collisions
+                        continue
+
+                # 2. In listening / standby mode, gate speech with 1.2s trailing silence
+                if rms >= SPEECH_THRESHOLD:
+                    last_speech_time = current_time
+                    if self.status != "speaking":
+                        self.set_status("listening")
+                    should_send = True
+                else:
+                    should_send = (current_time - last_speech_time) <= TRAILING_SILENCE_SEC
+
+                if not should_send:
+                    # In silent room, do not blast Gemini Live with endless empty chunks!
+                    continue
 
                 if hasattr(session, "send_realtime_input"):
                     await session.send_realtime_input(
@@ -190,7 +268,7 @@ class AlfredLiveCore:
     async def _wait_drain_and_transition(self) -> None:
         """Waits for continuous speaker playback buffer to drain to 0 bytes, then resets HUD status."""
         await self.audio_manager.wait_for_playback_drain()
-        if self.status == "speaking":
+        if self.status in ("speaking", "thinking"):
             next_status = "listening" if self.audio_manager.ptt_active else "idle"
             self.set_status(next_status)
             logger.info("[A.L.F.R.E.D.] Speech playback drained. Status transitioned to: %s", next_status)
@@ -202,6 +280,7 @@ class AlfredLiveCore:
             # 1. Instant Barge-in Interruption Handling
             if getattr(server_content, "interrupted", False):
                 logger.info("[A.L.F.R.E.D.] User interrupted. Draining speaker playback queue.")
+                self._disarm_thinking_watchdog()
                 self.audio_manager.clear_playback()
                 self.set_status("listening")
                 return
@@ -211,6 +290,7 @@ class AlfredLiveCore:
             if model_turn is not None:
                 for part in model_turn.parts:
                     if part.inline_data and part.inline_data.data:
+                        self._disarm_thinking_watchdog()
                         self.set_status("speaking")
                         self.audio_manager.feed_speaker_audio(part.inline_data.data)
 
@@ -220,12 +300,19 @@ class AlfredLiveCore:
 
             # 3. Model Turn Complete
             if getattr(server_content, "turn_complete", False):
+                self._disarm_thinking_watchdog()
                 self.audio_manager.mark_turn_complete()
-                asyncio.create_task(self._wait_drain_and_transition())
+                # Run buffer drain monitoring non-blockingly as asyncio.create_task
+                if self.audio_manager.is_playback_active():
+                    asyncio.create_task(self._wait_drain_and_transition())
+                else:
+                    if self.status != "speaking":
+                        self.set_status("listening")
 
         # 4. Tool Calls Dispatching
         tool_call = getattr(response, "tool_call", None)
         if tool_call is not None:
+            self._disarm_thinking_watchdog()
             function_calls = getattr(tool_call, "function_calls", [])
             for fc in function_calls:
                 await self.dispatch_tool_call(session, fc)
@@ -241,42 +328,57 @@ class AlfredLiveCore:
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                if not self.is_running:
+                    break
                 logger.error("Error in Live API receive stream: %s", e)
                 await asyncio.sleep(0.2)
 
     async def send_startup_briefing(self, session: Any) -> bool:
-        """Queries diagnostics & briefing notes and triggers initial executive greeting turn."""
+        """Queries fast diagnostics & briefing notes and triggers initial executive greeting turn."""
         if self._initial_briefing_sent:
             return False
 
         try:
-            diag = ""
+            # Fast non-blocking telemetry summary
+            cpu_val = round(psutil.cpu_percent(interval=None), 1)
+            ram_val = round(psutil.virtual_memory().percent, 1)
             briefing = ""
-            if "get_system_diagnostics" in self.tool_map:
-                fn = self.tool_map["get_system_diagnostics"]
-                diag = await fn() if inspect.iscoroutinefunction(fn) else await asyncio.to_thread(fn)
             if "manage_executive_briefing" in self.tool_map:
                 fn = self.tool_map["manage_executive_briefing"]
-                briefing = (
-                    await fn(action="list")
-                    if inspect.iscoroutinefunction(fn)
-                    else await asyncio.to_thread(fn, action="list")
-                )
+                try:
+                    briefing = (
+                        await fn(action="list")
+                        if inspect.iscoroutinefunction(fn)
+                        else await asyncio.to_thread(fn, action="list")
+                    )
+                except Exception:
+                    pass
 
             prompt = (
                 f"[SYSTEM EVENT: The Director has logged into the executive console. "
-                f"System Diagnostics: {diag}. "
+                f"System Diagnostics: CPU {cpu_val}%, RAM {ram_val}%. "
                 f"Executive Briefing Notes: {briefing}. "
                 f"Greet the Director with an articulate, composed, and concise 2-sentence executive status and agenda briefing.]"
             )
-            logger.info("[ALFRED CORE] Triggering Executive Startup Briefing turn...")
+            logger.info("[ALFRED CORE] Triggering Executive Startup Briefing turn (CPU: %s%%, RAM: %s%%)...", cpu_val, ram_val)
             self.set_status("thinking")
+            self._arm_thinking_watchdog(fallback_text="Startup Briefing")
             await session.send(input=prompt, end_of_turn=True)
             self._initial_briefing_sent = True
             return True
         except Exception as e:
             logger.warning("[ALFRED CORE] Failed to dispatch startup briefing: %s", e)
             return False
+
+    async def _delayed_startup_briefing(self, session: Any) -> None:
+        """Waits 0.5s after connection to ensure receive and mic streams are running, then sends greeting."""
+        try:
+            await asyncio.sleep(0.5)
+            await self.send_startup_briefing(session)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning("[ALFRED CORE] Delayed startup briefing encountered error: %s", e)
 
     async def start(self) -> None:
         """Starts the Gemini Multimodal Live API bidirectional session."""
@@ -319,18 +421,17 @@ class AlfredLiveCore:
                 logger.info(connected_msg)
                 self.update_transcript(connected_msg)
 
-                # Trigger initial Executive Startup Briefing upon connection
-                await self.send_startup_briefing(session)
-
                 async with asyncio.TaskGroup() as tg:
                     tg.create_task(self._stream_mic_to_alfred(session))
                     tg.create_task(self._receive_from_alfred(session))
+                    tg.create_task(self._delayed_startup_briefing(session))
 
         except Exception as e:
             disconnect_msg = f"[LIVE API DISCONNECTED]: {e}"
             logger.error(disconnect_msg)
             self.update_transcript(disconnect_msg)
         finally:
+            self._disarm_thinking_watchdog()
             self.is_running = False
             self._session = None
             self.set_status("idle")
@@ -356,6 +457,7 @@ class AlfredLiveCore:
     async def stop(self) -> None:
         """Gracefully disconnects the session and halts audio streams."""
         self._loop_active = False
+        self._disarm_thinking_watchdog()
         self.is_running = False
         await self.audio_manager.stop()
         self.set_status("idle")
