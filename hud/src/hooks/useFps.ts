@@ -7,10 +7,11 @@ import { useState, useEffect, useRef } from "react";
 export function useFps(): number {
   const [fps, setFps] = useState<number>(60);
   const frameCount = useRef<number>(0);
-  const lastTime = useRef<number>(performance.now());
+  const lastTime = useRef<number>(0);
   const animId = useRef<number>(0);
 
   useEffect(() => {
+    lastTime.current = performance.now();
     const loop = (now: number) => {
       frameCount.current++;
       const delta = now - lastTime.current;

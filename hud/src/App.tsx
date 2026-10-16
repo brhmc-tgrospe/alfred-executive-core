@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useAlfredWs } from "./hooks/useAlfredWs";
 import { useFps } from "./hooks/useFps";
 import { AudioOrb } from "./components/AudioOrb";
@@ -7,6 +7,11 @@ import { TranscriptDrawer } from "./components/TranscriptDrawer";
 import { ApprovalModal } from "./components/ApprovalModal";
 import { Sliders, Play, Volume2, ShieldAlert } from "lucide-react";
 import type { AlfredStatus, LayoutMode } from "./types";
+
+interface OrbPosition {
+  x: number;
+  y: number;
+}
 
 export function App() {
   const {
@@ -39,10 +44,139 @@ export function App() {
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("cinema");
   const [stealthEnabled, setStealthEnabled] = useState<boolean>(true);
 
+  // Persistent & Resizable Orb Size (100px - 500px, default 280px)
+  const [orbSize, setOrbSize] = useState<number>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("alfred_orb_size");
+      if (saved) {
+        const parsed = Number(saved);
+        if (!isNaN(parsed) && parsed >= 100 && parsed <= 500) {
+          return parsed;
+        }
+      }
+    }
+    return 280;
+  });
+
+  // Persistent Draggable Orb Position
+  const [orbPos, setOrbPos] = useState<OrbPosition | null>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("alfred_orb_pos");
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          if (typeof parsed?.x === "number" && typeof parsed?.y === "number") {
+            return parsed;
+          }
+        } catch {}
+      }
+    }
+    return null;
+  });
+
+  const updateOrbPos = useCallback((newPos: OrbPosition | null) => {
+    setOrbPos(newPos);
+    if (typeof window !== "undefined") {
+      if (newPos) {
+        localStorage.setItem("alfred_orb_pos", JSON.stringify(newPos));
+      } else {
+        localStorage.removeItem("alfred_orb_pos");
+      }
+    }
+  }, []);
+
+  const updateOrbSize = useCallback((updater: number | ((prev: number) => number)) => {
+    setOrbSize((prev) => {
+      const nextVal = typeof updater === "function" ? updater(prev) : updater;
+      const clamped = Math.max(100, Math.min(500, Math.round(nextVal)));
+      if (typeof window !== "undefined") {
+        localStorage.setItem("alfred_orb_size", clamped.toString());
+      }
+      return clamped;
+    });
+  }, []);
+
+  // Compute actual coordinates with fallback defaults
+  const actualX =
+    orbPos !== null
+      ? orbPos.x
+      : layoutMode === "docked"
+      ? typeof window !== "undefined"
+        ? Math.max(10, window.innerWidth - orbSize - 40)
+        : 800
+      : typeof window !== "undefined"
+      ? Math.max(0, Math.round((window.innerWidth - orbSize) / 2))
+      : 500;
+
+  const actualY =
+    orbPos !== null
+      ? orbPos.y
+      : layoutMode === "docked"
+      ? typeof window !== "undefined"
+        ? Math.max(10, window.innerHeight - orbSize - 140)
+        : 500
+      : typeof window !== "undefined"
+      ? Math.max(0, Math.round((window.innerHeight - orbSize) / 2 - 20))
+      : 300;
+
+  // Window resize bounds clamping
+  useEffect(() => {
+    const handleWindowResize = () => {
+      setOrbPos((prev) => {
+        if (!prev) return prev;
+        const clampedX = Math.max(10, Math.min(window.innerWidth - orbSize - 10, prev.x));
+        const clampedY = Math.max(10, Math.min(window.innerHeight - orbSize - 10, prev.y));
+        if (clampedX !== prev.x || clampedY !== prev.y) {
+          const next = { x: clampedX, y: clampedY };
+          localStorage.setItem("alfred_orb_pos", JSON.stringify(next));
+          return next;
+        }
+        return prev;
+      });
+    };
+    window.addEventListener("resize", handleWindowResize);
+    return () => window.removeEventListener("resize", handleWindowResize);
+  }, [orbSize]);
+
+  // Center reset helper
+  const handleResetCenter = useCallback(() => {
+    if (typeof window === "undefined") return;
+    const centerX = Math.max(0, Math.round((window.innerWidth - orbSize) / 2));
+    const centerY = Math.max(0, Math.round((window.innerHeight - orbSize) / 2 - 20));
+    updateOrbPos({ x: centerX, y: centerY });
+  }, [orbSize, updateOrbPos]);
+
+  // Snap to Docked helper
+  const handleSnapDocked = useCallback(() => {
+    if (typeof window === "undefined") return;
+    const dockedX = Math.max(10, window.innerWidth - orbSize - 40);
+    const dockedY = Math.max(10, window.innerHeight - orbSize - 140);
+    updateOrbPos({ x: dockedX, y: dockedY });
+    setLayoutMode("docked");
+  }, [orbSize, updateOrbPos]);
+
+  // Snap to Cinema helper
+  const handleSnapCinema = useCallback(() => {
+    handleResetCenter();
+    setLayoutMode("cinema");
+  }, [handleResetCenter]);
+
   // 3-state layout cycle: cinema -> docked -> orb_only -> cinema
   const toggleLayoutMode = useCallback(() => {
-    setLayoutMode((prev) => (prev === "cinema" ? "docked" : prev === "docked" ? "orb_only" : "cinema"));
-  }, []);
+    setLayoutMode((prev) => {
+      const next = prev === "cinema" ? "docked" : prev === "docked" ? "orb_only" : "cinema";
+      if (next === "docked") {
+        const dockedX = Math.max(10, window.innerWidth - orbSize - 40);
+        const dockedY = Math.max(10, window.innerHeight - orbSize - 140);
+        updateOrbPos({ x: dockedX, y: dockedY });
+      } else if (next === "cinema") {
+        const centerX = Math.max(0, Math.round((window.innerWidth - orbSize) / 2));
+        const centerY = Math.max(0, Math.round((window.innerHeight - orbSize) / 2 - 20));
+        updateOrbPos({ x: centerX, y: centerY });
+      }
+      return next;
+    });
+  }, [orbSize, updateOrbPos]);
 
   const toggleStealth = useCallback(() => {
     setStealthEnabled((prev) => {
@@ -117,6 +251,73 @@ export function App() {
     });
   }, []);
 
+  // Pointer Dragging for AudioOrb
+  const isDraggingRef = useRef(false);
+  const dragStartRef = useRef<{ startX: number; startY: number; orbX: number; orbY: number }>({
+    startX: 0,
+    startY: 0,
+    orbX: 0,
+    orbY: 0,
+  });
+
+  const handleOrbPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      if ((e.target as HTMLElement).closest("button, input, select, a")) return;
+
+      isDraggingRef.current = true;
+      dragStartRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        orbX: actualX,
+        orbY: actualY,
+      };
+
+      const electron = getElectronBridge();
+      if (electron) {
+        electron.setIgnoreMouseEvents(false);
+      }
+
+      const onPointerMove = (moveEvent: PointerEvent) => {
+        if (!isDraggingRef.current) return;
+        const dx = moveEvent.clientX - dragStartRef.current.startX;
+        const dy = moveEvent.clientY - dragStartRef.current.startY;
+        const newX = Math.round(dragStartRef.current.orbX + dx);
+        const newY = Math.round(dragStartRef.current.orbY + dy);
+        const clampedX = Math.max(
+          -Math.round(orbSize / 2),
+          Math.min(window.innerWidth - Math.round(orbSize / 2), newX)
+        );
+        const clampedY = Math.max(
+          -Math.round(orbSize / 2),
+          Math.min(window.innerHeight - Math.round(orbSize / 2), newY)
+        );
+        updateOrbPos({ x: clampedX, y: clampedY });
+      };
+
+      const onPointerUp = () => {
+        isDraggingRef.current = false;
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerUp);
+      };
+
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerUp);
+    },
+    [actualX, actualY, orbSize, updateOrbPos]
+  );
+
+  // Mouse wheel resize (±16px per notch)
+  const handleOrbWheel = useCallback(
+    (e: React.WheelEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const step = e.deltaY < 0 ? 16 : -16;
+      updateOrbSize((prev) => prev + step);
+    },
+    [updateOrbSize]
+  );
+
   // Simulation helpers for verification
   const simulateState = (status: AlfredStatus, rms: number, transcript: string) => {
     injectMockState({
@@ -179,24 +380,34 @@ export function App() {
         </div>
       )}
 
-      {/* 2. AudioOrb: Cinema Mode (Center) vs Compact Corner Dock vs Orb-Only */}
-      {layoutMode === "cinema" ? (
-        <div className="flex-1 flex flex-col items-center justify-center relative">
-          <div className="pointer-events-auto">
-            <AudioOrb
-              rmsVolume={state.rms_volume}
-              status={state.status}
-              size={320}
-            />
-          </div>
+      {/* Spacer to preserve flex structure between top bar and bottom drawer */}
+      <div className="flex-1 pointer-events-none" />
 
-          {/* Ambient HUD Subtitle / Status Display */}
-          <div className="mt-3 flex items-center gap-2 pointer-events-none">
-            <span className="font-mono text-xs tracking-widest text-cyan-400/80 uppercase">
-              A.L.F.R.E.D.
-            </span>
+      {/* 2. Freely Draggable & Resizable 3D AudioOrb (Position: Fixed across all modes) */}
+      <div
+        style={{
+          position: "fixed",
+          left: `${actualX}px`,
+          top: `${actualY}px`,
+          width: `${orbSize}px`,
+          height: `${orbSize}px`,
+          touchAction: "none",
+        }}
+        onPointerDown={handleOrbPointerDown}
+        onWheel={handleOrbWheel}
+        onMouseEnter={handlePanelMouseEnter}
+        onMouseLeave={handlePanelMouseLeave}
+        className="group z-30 pointer-events-auto flex items-center justify-center cursor-grab active:cursor-grabbing select-none"
+        title="Click & Drag to move anywhere on desktop. Scroll wheel or use hover pill to resize."
+      >
+        <AudioOrb rmsVolume={state.rms_volume} status={state.status} size={orbSize} />
+
+        {/* Ambient Mode Subtitle / Status Display */}
+        {layoutMode === "cinema" ? (
+          <div className="absolute -top-6 left-1/2 -translate-x-1/2 flex items-center gap-1.5 pointer-events-none whitespace-nowrap opacity-80 font-mono text-[10px] tracking-widest uppercase">
+            <span className="text-cyan-400 font-semibold">A.L.F.R.E.D.</span>
             <span className="text-slate-600">|</span>
-            <span className="font-mono text-xs tracking-widest text-slate-400 uppercase">
+            <span className="text-slate-400">
               {state.status === "speaking"
                 ? "Synthesizing Vocal Response"
                 : state.status === "thinking"
@@ -206,67 +417,105 @@ export function App() {
                 : "Standing By"}
             </span>
           </div>
-        </div>
-      ) : layoutMode === "docked" ? (
-        <>
-          {/* In Docked Mode, center monitor remains 100% unobstructed for coding */}
-          <div className="flex-1" />
-
-          {/* Compact 180x180px Floating Glassmorphic Corner Dock */}
-          <aside
-            onMouseEnter={handlePanelMouseEnter}
-            onMouseLeave={handlePanelMouseLeave}
-            className="fixed bottom-28 right-8 z-30 pointer-events-auto p-2.5 rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-cyan-500/40 shadow-[0_8px_32px_rgba(0,0,0,0.7)] flex flex-col items-center justify-center transition-all duration-300"
-          >
-            <AudioOrb
-              rmsVolume={state.rms_volume}
-              status={state.status}
-              size={180}
-            />
-            <div className="flex items-center gap-1.5 mt-1 pointer-events-none font-mono text-[9px] tracking-widest text-cyan-400/90 uppercase">
-              <span>DOCKED</span>
-              <span className="text-slate-600">|</span>
-              <span className="text-slate-400 capitalize">{state.status}</span>
-            </div>
-          </aside>
-        </>
-      ) : (
-        /* Orb-Only Minimalist Mode: Center 3D Orb with hover mini-pill */
-        <div className="flex-1 flex flex-col items-center justify-center relative">
-          <div
-            className="relative group pointer-events-auto flex flex-col items-center justify-center"
-            onMouseEnter={handlePanelMouseEnter}
-            onMouseLeave={handlePanelMouseLeave}
-          >
-            <AudioOrb
-              rmsVolume={state.rms_volume}
-              status={state.status}
-              size={320}
-            />
-
-            {/* Subtle floating mini-pill visible on hover over Orb in Orb-Only mode */}
-            <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-950/90 backdrop-blur-xl border border-cyan-500/40 shadow-[0_4px_24px_rgba(0,0,0,0.85)] text-[10px] font-mono select-none pointer-events-auto">
-              <span className="text-cyan-400 font-bold tracking-wider">ORB-ONLY</span>
-              <span className="text-slate-600">|</span>
-              <button
-                onClick={() => setLayoutMode("cinema")}
-                className="text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer px-1 py-0.5 rounded hover:bg-cyan-950/40"
-                title="Switch to Cinema Mode"
-              >
-                Cinema
-              </button>
-              <span className="text-slate-600">|</span>
-              <button
-                onClick={() => setLayoutMode("docked")}
-                className="text-slate-300 hover:text-cyan-300 transition-colors cursor-pointer px-1 py-0.5 rounded hover:bg-cyan-950/40"
-                title="Switch to Docked Mode"
-              >
-                Docked
-              </button>
-            </div>
+        ) : layoutMode === "docked" ? (
+          <div className="absolute -top-5 left-1/2 -translate-x-1/2 flex items-center gap-1.5 pointer-events-none font-mono text-[9px] tracking-widest text-cyan-400/90 uppercase whitespace-nowrap">
+            <span>DOCKED</span>
+            <span className="text-slate-600">|</span>
+            <span className="text-slate-400 capitalize">{state.status}</span>
           </div>
+        ) : null}
+
+        {/* Hover Mini-Pill: [-], [+], Size readout, [Center], and Mode Switchers */}
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          className="absolute -bottom-10 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-950/90 backdrop-blur-xl border border-cyan-500/40 shadow-[0_4px_24px_rgba(0,0,0,0.85)] text-[10px] font-mono select-none pointer-events-auto z-50 whitespace-nowrap"
+        >
+          {/* Drag Grip Indicator */}
+          <span className="text-slate-500 cursor-grab text-[9px] mr-0.5" title="Drag Orb">
+            ⋮⋮
+          </span>
+
+          {/* Size Reduction */}
+          <button
+            type="button"
+            onClick={() => updateOrbSize((s) => s - 16)}
+            className="w-5 h-5 flex items-center justify-center rounded bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-cyan-300 border border-slate-700/80 cursor-pointer font-bold"
+            title="Decrease Orb Size (-16px)"
+          >
+            -
+          </button>
+
+          {/* Size Readout */}
+          <span
+            className="text-cyan-300 font-bold min-w-[38px] text-center"
+            title="Orb Diameter (Scroll mouse wheel to resize)"
+          >
+            {orbSize}px
+          </span>
+
+          {/* Size Increase */}
+          <button
+            type="button"
+            onClick={() => updateOrbSize((s) => s + 16)}
+            className="w-5 h-5 flex items-center justify-center rounded bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-cyan-300 border border-slate-700/80 cursor-pointer font-bold"
+            title="Increase Orb Size (+16px)"
+          >
+            +
+          </button>
+
+          <span className="text-slate-600">|</span>
+
+          {/* Center Reset */}
+          <button
+            type="button"
+            onClick={handleResetCenter}
+            className="px-1.5 py-0.5 rounded bg-slate-900 hover:bg-cyan-950/60 text-slate-300 hover:text-cyan-300 border border-slate-700/80 cursor-pointer transition-colors"
+            title="Reset Orb to Center of Screen"
+          >
+            Center
+          </button>
+
+          <span className="text-slate-600">|</span>
+
+          {/* Mode Switchers */}
+          <button
+            type="button"
+            onClick={handleSnapCinema}
+            className={`px-1.5 py-0.5 rounded cursor-pointer transition-colors ${
+              layoutMode === "cinema"
+                ? "bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/40"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+            title="Cinema Mode (Centered Orb + Telemetry + Transcripts)"
+          >
+            Cinema
+          </button>
+          <button
+            type="button"
+            onClick={handleSnapDocked}
+            className={`px-1.5 py-0.5 rounded cursor-pointer transition-colors ${
+              layoutMode === "docked"
+                ? "bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/40"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+            title="Docked Mode (Bottom-Right Floating Dock)"
+          >
+            Docked
+          </button>
+          <button
+            type="button"
+            onClick={() => setLayoutMode("orb_only")}
+            className={`px-1.5 py-0.5 rounded cursor-pointer transition-colors ${
+              layoutMode === "orb_only"
+                ? "bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+            title="Orb-Only Mode (Minimalist Floating Orb Only)"
+          >
+            Orb-Only
+          </button>
         </div>
-      )}
+      </div>
 
       {/* 3. Bottom Scrolling Transcript Drawer with Simulation Toolbar (Hidden in Orb-Only mode) */}
       {layoutMode !== "orb_only" && (

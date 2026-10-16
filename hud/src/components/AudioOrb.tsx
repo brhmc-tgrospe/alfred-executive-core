@@ -17,6 +17,9 @@ const STATUS_COLORS: Record<AlfredStatus, number> = {
 
 export function AudioOrb({ rmsVolume, status, size = 280 }: AudioOrbProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const sizeRef = useRef<number>(size);
 
   // Mutable refs to prevent React state re-renders at 60 FPS
   const rmsRef = useRef<number>(rmsVolume);
@@ -31,21 +34,33 @@ export function AudioOrb({ rmsVolume, status, size = 280 }: AudioOrbProps) {
     statusRef.current = status;
   }, [status]);
 
+  // Decoupled dynamic resizing without scene recreation
+  useEffect(() => {
+    sizeRef.current = size;
+    if (rendererRef.current && cameraRef.current) {
+      rendererRef.current.setSize(size, size);
+      cameraRef.current.aspect = 1;
+      cameraRef.current.updateProjectionMatrix();
+    }
+  }, [size]);
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     // 1. Scene, Camera, Renderer Setup
-    const width = size;
-    const height = size;
+    const width = sizeRef.current;
+    const height = sizeRef.current;
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
     camera.position.z = 4.2;
+    cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    rendererRef.current = renderer;
     container.appendChild(renderer.domElement);
 
     // 2. Lighting
@@ -220,13 +235,15 @@ export function AudioOrb({ rmsVolume, status, size = 280 }: AudioOrbProps) {
       particleGeo.dispose();
       particleMat.dispose();
       renderer.dispose();
+      rendererRef.current = null;
+      cameraRef.current = null;
     };
-  }, [size]);
+  }, []);
 
   return (
     <div
       ref={containerRef}
-      className="relative flex items-center justify-center transition-all duration-300"
+      className="relative flex items-center justify-center transition-all duration-300 pointer-events-none"
       style={{ width: size, height: size }}
     />
   );
