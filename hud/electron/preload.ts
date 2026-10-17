@@ -31,6 +31,16 @@ const electronBridge = {
   shutdownApp: () => {
     ipcRenderer.send("shutdown-app");
   },
+  forceClickThrough: () => {
+    ipcRenderer.send("force-click-through");
+  },
+  onForceClickThrough: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("force-click-through", handler);
+    return () => {
+      ipcRenderer.removeListener("force-click-through", handler);
+    };
+  },
 };
 
 // Expose both alfredElectron and electronAPI for seamless compatibility

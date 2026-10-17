@@ -220,6 +220,38 @@ export function App() {
     };
   }, [toggleMic, toggleLayoutMode]);
 
+  // Ensure Click-Through (ignoreMouseEvents = true) is strictly enabled by default on startup & listen for panic shortcut
+  useEffect(() => {
+    const electron = getElectronBridge();
+    if (electron?.setIgnoreMouseEvents) {
+      electron.setIgnoreMouseEvents(true, { forward: true });
+    }
+    const unsubForce = electron?.onForceClickThrough?.(() => {
+      setClickThroughLocked(false);
+      electron.setIgnoreMouseEvents(true, { forward: true });
+    });
+    return () => {
+      unsubForce?.();
+    };
+  }, []);
+
+  // Global window-level mouse movement watcher:
+  // Whenever the mouse cursor moves over transparent empty space (outside .hud-interactive panels)
+  // and clickThroughLocked is false, IMMEDIATELY call setIgnoreMouseEvents(true) so desktop clicks are NEVER swallowed!
+  useEffect(() => {
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      if (clickThroughLocked || isDraggingRef.current) return;
+      const target = e.target as HTMLElement | null;
+      const isInteractive = target && Boolean(target.closest(".hud-interactive, button, input, select, a"));
+      if (!isInteractive) {
+        const electron = getElectronBridge();
+        electron?.setIgnoreMouseEvents(true, { forward: true });
+      }
+    };
+    window.addEventListener("mousemove", handleGlobalMouseMove, { passive: true });
+    return () => window.removeEventListener("mousemove", handleGlobalMouseMove);
+  }, [clickThroughLocked]);
+
   // Mouse event IPC forwarder for Electron transparent overlay
   const handlePanelMouseEnter = useCallback(() => {
     const electron = getElectronBridge();
@@ -229,7 +261,7 @@ export function App() {
   }, []);
 
   const handlePanelMouseLeave = useCallback(() => {
-    if (clickThroughLocked) return;
+    if (clickThroughLocked || isDraggingRef.current) return;
     const electron = getElectronBridge();
     if (electron) {
       electron.setIgnoreMouseEvents(true, { forward: true });
@@ -349,10 +381,20 @@ export function App() {
   };
 
   return (
-    <main className="w-screen h-screen relative flex flex-col justify-between p-6 overflow-hidden pointer-events-none select-none bg-transparent">
+    <main
+      onMouseMove={(e) => {
+        if (clickThroughLocked || isDraggingRef.current) return;
+        const isInteractive = Boolean((e.target as HTMLElement)?.closest(".hud-interactive"));
+        if (e.target === e.currentTarget || !isInteractive) {
+          const electron = getElectronBridge();
+          electron?.setIgnoreMouseEvents(true, { forward: true });
+        }
+      }}
+      className="w-screen h-screen relative flex flex-col justify-between p-6 overflow-hidden pointer-events-none select-none bg-transparent"
+    >
       {/* 1. Top Telemetry Bar with Toggle-to-Talk & Interactivity Lock (Hidden in Orb-Only mode) */}
       {layoutMode !== "orb_only" && (
-        <div className="w-full flex justify-center pointer-events-auto">
+        <div className="hud-interactive w-full flex justify-center pointer-events-auto">
           <TelemetryBar
             status={state.status}
             cpu={state.cpu}
@@ -400,7 +442,7 @@ export function App() {
         onWheel={handleOrbWheel}
         onMouseEnter={handlePanelMouseEnter}
         onMouseLeave={handlePanelMouseLeave}
-        className="group z-30 pointer-events-auto flex items-center justify-center cursor-grab active:cursor-grabbing select-none"
+        className="hud-interactive group z-30 pointer-events-auto flex items-center justify-center cursor-grab active:cursor-grabbing select-none"
         title="Click & Drag to move anywhere on desktop. Scroll wheel or use hover pill to resize."
       >
         <AudioOrb rmsVolume={state.rms_volume} status={state.status} size={orbSize} />
@@ -532,7 +574,7 @@ export function App() {
 
       {/* 3. Bottom Scrolling Transcript Drawer with Simulation Toolbar (Hidden in Orb-Only mode) */}
       {layoutMode !== "orb_only" && (
-        <div className="w-full flex justify-center pointer-events-auto">
+        <div className="hud-interactive w-full flex justify-center pointer-events-auto">
           <TranscriptDrawer
             transcript={state.transcript}
             status={state.status}
@@ -546,7 +588,7 @@ export function App() {
 
       {/* 4. High-Priority 30-Second Security Approval Modal */}
       {state.pending_approval && (
-        <div className="pointer-events-auto">
+        <div className="hud-interactive pointer-events-auto">
           <ApprovalModal
             key={state.pending_approval.id}
             approval={state.pending_approval}
@@ -561,7 +603,7 @@ export function App() {
       <aside
         onMouseEnter={handlePanelMouseEnter}
         onMouseLeave={handlePanelMouseLeave}
-        className="fixed bottom-4 right-4 z-40 pointer-events-auto"
+        className="hud-interactive fixed bottom-4 right-4 z-40 pointer-events-auto"
       >
         {showSimControls ? (
           <div className="p-3 rounded-xl bg-slate-950/90 backdrop-blur-xl border border-cyan-500/30 shadow-2xl flex flex-col gap-2 font-mono text-[11px]">

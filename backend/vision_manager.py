@@ -230,6 +230,40 @@ class VisionManager:
         """Captures raw uncompressed PIL Image of the screen or monitor."""
         return self._grab_raw_image(monitor_index=monitor_index)
 
+    def capture_screen_patch(
+        self,
+        center_x: int,
+        center_y: int,
+        patch_size: int = 120,
+        monitor_index: int = 1,
+    ) -> np.ndarray:
+        """Captures a native-resolution square patch centered at (center_x, center_y) as a BGR numpy array.
+
+        Args:
+            center_x: Horizontal center coordinate on the desktop.
+            center_y: Vertical center coordinate on the desktop.
+            patch_size: Width and height of the square patch (default: 120).
+            monitor_index: Monitor index to capture from (default: 1).
+
+        Returns:
+            A BGR numpy array of dimensions (patch_size, patch_size, 3).
+        """
+        raw_pil = self._grab_raw_image(monitor_index=monitor_index)
+        img_w, img_h = raw_pil.width, raw_pil.height
+
+        half = patch_size // 2
+        left = max(0, min(max(0, img_w - patch_size), center_x - half))
+        top = max(0, min(max(0, img_h - patch_size), center_y - half))
+        right = min(img_w, left + patch_size)
+        bottom = min(img_h, top + patch_size)
+
+        crop = raw_pil.crop((left, top, right, bottom))
+        if crop.size != (patch_size, patch_size):
+            crop = crop.resize((patch_size, patch_size), Image.Resampling.NEAREST)
+
+        rgb_arr = np.array(crop.convert("RGB"))
+        return cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+
     def get_som_cache(self) -> Dict[str, Any]:
         """Returns the cached Set-of-Marks mapping tags and control labels to pixel coordinates."""
         return VisionManager._som_cache or getattr(self, "_som_cache", {})

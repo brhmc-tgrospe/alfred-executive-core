@@ -55,10 +55,37 @@ DESTRUCTIVE_HOTKEYS = {
 }
 
 import ctypes
+from ctypes import wintypes
 import sys
+import cv2
+import numpy as np
+
+ULONG_PTR = ctypes.c_ulonglong
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+class INPUT(ctypes.Structure):
+    class _I(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT)]
+    _anonymous_ = ("_i",)
+    _fields_ = [("type", wintypes.DWORD), ("_i", _I)]
+
+INPUT_MOUSE = 0
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
 
 def get_live_cursor_coords() -> tuple[int, int]:
     """Retrieves current hardware OS cursor coordinates with pyautogui fallback."""
@@ -76,6 +103,39 @@ def get_live_cursor_coords() -> tuple[int, int]:
         except Exception:
             pass
     return 0, 0
+
+def send_hardware_mouse_click(x: int, y: int, button: str = "left", hold_ms: float = 0.0) -> bool:
+    """Dispatches low-level Win32 SendInput hardware mouse events with pyautogui fallback."""
+    if hasattr(ctypes, "windll") and sys.platform.startswith("win"):
+        try:
+            ctypes.windll.user32.SetCursorPos(int(x), int(y))
+            time.sleep(0.015)
+            down_flag = MOUSEEVENTF_LEFTDOWN if button == "left" else MOUSEEVENTF_RIGHTDOWN
+            up_flag = MOUSEEVENTF_LEFTUP if button == "left" else MOUSEEVENTF_RIGHTUP
+
+            inp_down = INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(dx=0, dy=0, mouseData=0, dwFlags=down_flag, time=0, dwExtraInfo=0))
+            inp_up = INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(dx=0, dy=0, mouseData=0, dwFlags=up_flag, time=0, dwExtraInfo=0))
+
+            ctypes.windll.user32.SendInput(1, ctypes.byref(inp_down), ctypes.sizeof(INPUT))
+            if hold_ms > 0:
+                time.sleep(hold_ms / 1000.0)
+            else:
+                time.sleep(0.02)
+            ctypes.windll.user32.SendInput(1, ctypes.byref(inp_up), ctypes.sizeof(INPUT))
+            return True
+        except Exception as ex:
+            logger.warning("[Hardware Click] SendInput encountered error: %s, falling back to pyautogui", ex)
+
+    if pyautogui is not None:
+        try:
+            if button == "left":
+                pyautogui.click(x, y)
+            else:
+                pyautogui.rightClick(x, y)
+            return True
+        except Exception:
+            return False
+    return False
 
 
 class GuiAutomationLogistics:
@@ -533,7 +593,8 @@ class GuiAutomationLogistics:
                 x, y = int(cx), int(cy)
                 logger.info("[Pixel Navigation] Resolved '%s' to center coordinates (%d, %d)", target_label_or_tag, x, y)
             else:
-                return f"Error: Could not resolve Set-of-Marks tag or label '{target_label_or_tag}' on active screen."
+                if x == -1 and y == -1:
+                    return f"Error: Could not resolve Set-of-Marks tag or label '{target_label_or_tag}' on active screen."
 
         # 2. Support live cursor auto-targeting when coordinates are (-1, -1) or user says 'click where my mouse is'
         if x == -1 and y == -1:
@@ -545,21 +606,74 @@ class GuiAutomationLogistics:
             if x < 0 or x >= screen_w or y < 0 or y >= screen_h:
                 return f"Error: Pixel coordinates ({x}, {y}) are outside screen bounds ({screen_w}x{screen_h})."
 
+            tag_note = f" (target: '{target_label_or_tag}')" if target_label_or_tag else ""
+
             if act == "click":
-                pyautogui.click(x, y)
+                # Pre-click visual patch capture (120x120 window centered at click coordinates)
+                pre_patch = self.vision.capture_screen_patch(x, y, patch_size=120)
+
+                # Attempt 1: Hardware SendInput left click
+                send_hardware_mouse_click(x, y, button="left", hold_ms=0.0)
+                time.sleep(0.18)
+
+                post_patch_1 = self.vision.capture_screen_patch(x, y, patch_size=120)
+                diff1 = cv2.absdiff(pre_patch, post_patch_1)
+                gray1 = cv2.cvtColor(diff1, cv2.COLOR_BGR2GRAY)
+                changed_px1 = int(cv2.countNonZero((gray1 > 15).astype(np.uint8)))
+                total_px = max(1, gray1.shape[0] * gray1.shape[1])
+                change_pct_1 = (changed_px1 / float(total_px)) * 100.0
+
+                if change_pct_1 >= 1.5:
+                    return f"Successfully executed desktop mouse click at coordinates ({x}, {y}){tag_note} (visual response verified: {change_pct_1:.1f}% patch change)."
+
+                # Attempt 2: Bounded single retry with 80ms press hold to penetrate custom game UI loops
+                logger.warning(
+                    "[Pixel Navigation] Attempt 1 visual change %.2f%% < 1.5%% at (%d, %d). Retrying once with 80ms press hold.",
+                    change_pct_1, x, y
+                )
+                send_hardware_mouse_click(x, y, button="left", hold_ms=80.0)
+                time.sleep(0.18)
+
+                post_patch_2 = self.vision.capture_screen_patch(x, y, patch_size=120)
+                diff2 = cv2.absdiff(pre_patch, post_patch_2)
+                gray2 = cv2.cvtColor(diff2, cv2.COLOR_BGR2GRAY)
+                changed_px2 = int(cv2.countNonZero((gray2 > 15).astype(np.uint8)))
+                change_pct_2 = (changed_px2 / float(total_px)) * 100.0
+
+                if change_pct_2 >= 1.5:
+                    return f"Successfully executed desktop mouse click at coordinates ({x}, {y}){tag_note} on attempt 2 (visual response verified: {change_pct_2:.1f}% patch change)."
+
+                # Bounded 2-try limit reached: STOP immediately and return honest failure report!
+                logger.warning(
+                    "[Pixel Navigation] Bounded 2-try limit reached at (%d, %d). Visual change 1: %.2f%%, 2: %.2f%% < 1.5%%.",
+                    x, y, change_pct_1, change_pct_2
+                )
+                target_desc = f" targeting '{target_label_or_tag}'" if target_label_or_tag else ""
+                return (
+                    f"ACTION UNVERIFIED AFTER 2 ATTEMPTS at ({x}, {y}){target_desc}: "
+                    f"The target button/icon in the application did not visually respond "
+                    f"(visual changes: attempt 1 = {change_pct_1:.1f}%, attempt 2 = {change_pct_2:.1f}% < 1.5% threshold). "
+                    f"Inform Director Qadir what was attempted and why it failed."
+                )
+
             elif act == "double_click":
-                pyautogui.doubleClick(x, y)
+                send_hardware_mouse_click(x, y, button="left")
+                time.sleep(0.08)
+                send_hardware_mouse_click(x, y, button="left")
             elif act == "right_click":
-                pyautogui.rightClick(x, y)
+                send_hardware_mouse_click(x, y, button="right")
             elif act == "move":
-                pyautogui.moveTo(x, y, duration=0.2)
+                if hasattr(ctypes, "windll") and sys.platform.startswith("win"):
+                    ctypes.windll.user32.SetCursorPos(int(x), int(y))
+                else:
+                    pyautogui.moveTo(x, y, duration=0.2)
             elif act == "scroll":
-                pyautogui.moveTo(x, y)
+                if hasattr(ctypes, "windll") and sys.platform.startswith("win"):
+                    ctypes.windll.user32.SetCursorPos(int(x), int(y))
                 pyautogui.scroll(scroll_amount)
             else:
                 return f"Error: Unsupported mouse action '{action}'. Supported: 'click', 'double_click', 'right_click', 'move', 'scroll'."
 
-            tag_note = f" (target: '{target_label_or_tag}')" if target_label_or_tag else ""
             return f"Successfully executed desktop mouse {act} at coordinates ({x}, {y}){tag_note}."
         except Exception as e:
             logger.error("Error executing screen_pixel_navigation: %s", e)

@@ -47,7 +47,7 @@ export function TranscriptDrawer({
     <div
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      className="w-full max-w-3xl mx-auto rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-cyan-500/30 shadow-[0_8px_32px_rgba(0,0,0,0.6)] overflow-hidden transition-all duration-300"
+      className="hud-interactive w-full max-w-3xl mx-auto rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-cyan-500/30 shadow-[0_8px_32px_rgba(0,0,0,0.6)] overflow-hidden transition-all duration-300"
     >
       {/* Header Bar with Integrated Quick-Test Chips */}
       <div className="px-3 py-1.5 flex items-center justify-between select-none bg-slate-900/70 border-b border-cyan-500/20 text-xs transition-colors gap-2">

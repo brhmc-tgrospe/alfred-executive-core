@@ -67,12 +67,19 @@ def test_screen_pixel_navigation_with_som_tag():
         "#2": {"center": (475, 330), "bbox": (400, 300, 150, 60), "type": "UI_ELEMENT"},
     }
 
-    with patch("backend.tools.gui_automation.pyautogui") as mock_pg:
+    with patch("backend.tools.gui_automation.pyautogui") as mock_pg, \
+         patch("backend.tools.gui_automation.send_hardware_mouse_click") as mock_send, \
+         patch.object(gui.vision, "capture_screen_patch") as mock_patch:
         mock_pg.size.return_value = (1920, 1080)
+        pre_patch = np.zeros((120, 120, 3), dtype=np.uint8)
+        post_patch = np.zeros((120, 120, 3), dtype=np.uint8)
+        post_patch[0:30, 0:30] = 255
+        mock_patch.side_effect = [pre_patch, post_patch]
+
         # Click by tag "#2"
         res = gui.screen_pixel_navigation(action="click", target_label_or_tag="#2")
         assert "Successfully executed desktop mouse click at coordinates (475, 330)" in res
-        mock_pg.click.assert_called_once_with(475, 330)
+        mock_send.assert_called_with(475, 330, button="left", hold_ms=0.0)
 
         # Invalid tag fallback
         res_invalid = gui.screen_pixel_navigation(action="click", target_label_or_tag="#99")
@@ -281,6 +288,7 @@ async def test_terminate_executive_commands_voice_drain_and_shutdown():
         shutdown_farewell_msg = msg
 
     coordinator.schedule_shutdown = test_shutdown_hook
+    coordinator.trigger_graceful_shutdown = test_shutdown_hook
     os_log.set_shutdown_callback(test_shutdown_hook)
     coordinator.live_core.set_shutdown_callback(test_shutdown_hook)
 

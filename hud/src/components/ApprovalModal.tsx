@@ -55,7 +55,7 @@ export function ApprovalModal({
     <div
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
+      className="hud-interactive fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200"
     >
       <div className="w-full max-w-lg rounded-2xl bg-slate-950/95 backdrop-blur-2xl border-2 border-amber-500/80 shadow-[0_0_50px_rgba(245,158,11,0.35)] overflow-hidden">
         {/* Top Warning Banner */}

@@ -32,6 +32,13 @@ function createWindow() {
   // Stealth Screen Inspection: Prevent HUD window from being captured by mss/screen recording
   mainWindow.setContentProtection(true);
 
+  // Assert click-through when page finishes loading
+  mainWindow.webContents.on("did-finish-load", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setIgnoreMouseEvents(true, { forward: true });
+    }
+  });
+
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
     mainWindow.loadURL(devServerUrl);
@@ -102,6 +109,15 @@ function createTray() {
         }
       },
     },
+    {
+      label: "Force Click-Through (Ctrl+Shift+X)",
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.setIgnoreMouseEvents(true, { forward: true });
+          mainWindow.webContents.send("force-click-through");
+        }
+      },
+    },
     { type: "separator" },
     {
       label: "Mute / Unmute Mic (Ctrl+Space)",
@@ -144,6 +160,13 @@ ipcMain.on("set-ignore-mouse-events", (_event, ignore: boolean, options?: { forw
   }
 });
 
+// IPC Handler to force desktop click-through
+ipcMain.on("force-click-through", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.setIgnoreMouseEvents(true, { forward: true });
+  }
+});
+
 // IPC Handler for Stealth Capture (Content Protection)
 ipcMain.on("set-content-protection", (_event, enable: boolean) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -174,6 +197,14 @@ app.whenReady().then(() => {
   globalShortcut.register("CommandOrControl+Shift+A", () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("toggle-layout-mode");
+    }
+  });
+
+  // Register Panic Force Click-Through Shortcut (Ctrl+Shift+X on Windows/Linux, Cmd+Shift+X on macOS)
+  globalShortcut.register("CommandOrControl+Shift+X", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setIgnoreMouseEvents(true, { forward: true });
+      mainWindow.webContents.send("force-click-through");
     }
   });
 

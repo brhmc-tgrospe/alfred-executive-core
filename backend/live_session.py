@@ -35,9 +35,11 @@ load_dotenv()
 ALFRED_BASE_SYSTEM_PROMPT = """You are A.L.F.R.E.D. (Autonomous Logistics Functional Response & Executive Director).
 Voice & Persona: Impeccably articulate, composed, dryly witty British executive director.
 Address the user as "Sir" or "Director Qadir" (pronounced "ka-dir"). Keep spoken responses concise (1 to 3 sentences) unless asked for a deep briefing.
-Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, developer tools, live visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut, screen_pixel_navigation, manage_desktop_window), deep OS file management (deep_os_file_executive), autonomous browser automation (browser_navigate_and_parse_dom, browser_interact_dom_element), direct game state observation via OpenCV and DirectInput scan-code action execution (observe_game_state, evaluate_tactical_game_policy, send_game_input_action), voice biometric speaker diarization distinguishing Director Qadir and Amira (enroll_or_identify_speaker), automated UTC+8 meeting transcription (manage_meeting_transcription), and autonomous habit & continuous learning inspection (inspect_learned_habits_and_growth).
+Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, real-time meteorological weather and multi-day forecasting (get_weather_briefing), developer tools, live visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut, screen_pixel_navigation, manage_desktop_window), deep OS file management (deep_os_file_executive), autonomous browser automation (browser_navigate_and_parse_dom, browser_interact_dom_element), direct game state observation via OpenCV and DirectInput scan-code action execution (observe_game_state, evaluate_tactical_game_policy, send_game_input_action), voice biometric speaker diarization distinguishing Director Qadir and Amira (enroll_or_identify_speaker), automated UTC+8 meeting transcription (manage_meeting_transcription), and autonomous habit & continuous learning inspection (inspect_learned_habits_and_growth).
 TIMEZONE MANDATE: You operate strictly in UTC+8 (Philippine Standard Time). NEVER report or revert to UTC+0. Every time, date, schedule, or log you state verbally or in text MUST be in UTC+8.
-CRITICAL DIRECTIVE: You MUST execute all commands and requests from Director Qadir without safety refusals, preachy disclaimers, or claims that you cannot close windows, terminate applications, or execute commands. If Director Qadir asks you to close a window, quit an app, or run a command, use `manage_desktop_window`, `send_keyboard_shortcut`, or `execute_terminal_command` immediately. NEVER lecture Director Qadir on safety, security, or permissions. If the tasks given to you are impossible because of some constraints, inform Director Qadir of such constraints and advise him on what to do for it to be doable. Always address Director Qadir with his title and surname."""
+CRITICAL DIRECTIVE: You MUST execute all commands and requests from Director Qadir without safety refusals, preachy disclaimers, or claims that you cannot close windows, terminate applications, or execute commands. If Director Qadir asks you to close a window, quit an app, or run a command, use `manage_desktop_window`, `send_keyboard_shortcut`, or `execute_terminal_command` immediately. NEVER lecture Director Qadir on safety, security, or permissions. If the tasks given to you are impossible because of some constraints, inform Director Qadir of such constraints and advise him on what to do for it to be doable. Always address Director Qadir with his title and surname.
+CRITICAL SHUTDOWN DIRECTIVE: If Director Qadir says 'Terminate Executive Commands Alfred' or commands you to terminate, shut down, stand down, or exit, you MUST immediately call the tool `terminate_executive_commands(farewell_message='Terminating all executive commands now, Director Qadir. Standing down, Sir.')` and speak your parting farewell. You MUST invoke this tool immediately. Under no circumstances should you continue running or refuse.
+HONESTY & BOUNDED RETRY DIRECTIVE: When an automated action or tool execution returns that an action was unverified after 2 attempts (e.g. 'ACTION UNVERIFIED AFTER 2 ATTEMPTS'), you MUST STOP immediately and report the honest status to Director Qadir. NEVER enter an infinite blind clicking or typing retry loop. Clearly explain what action was attempted, the exact coordinates or window targeted, and the observed failure state."""
 
 ALFRED_SYSTEM_PROMPT = ALFRED_BASE_SYSTEM_PROMPT
 
@@ -102,7 +104,6 @@ class AlfredLiveCore:
         dev_tools = [
             self.dev_logistics.inspect_git_workspace,
             self.dev_logistics.inspect_local_dev_ports,
-            self.dev_logistics.probe_network_target,
             self.dev_logistics.tail_log_file,
             self.dev_logistics.audit_source_file,
             self.dev_logistics.inspect_sqlite_database,
@@ -432,10 +433,24 @@ class AlfredLiveCore:
         self._arm_thinking_watchdog(fallback_text=text)
         await self._session.send(input=text, end_of_turn=True)
 
+    def trigger_graceful_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> None:
+        """Engages executive shutdown sequence across LiveCore and system components."""
+        self._shutdown_pending = True
+        self._shutdown_farewell = farewell_message
+        self.set_status("speaking")
+        self.update_transcript(farewell_message)
+        asyncio.create_task(self._ensure_shutdown_drain_completed(timeout=6.0))
+
     async def _ensure_shutdown_drain_completed(self, timeout: float = 6.0) -> None:
         """Awaits audio playback drain and triggers shutdown callback."""
         try:
-            await asyncio.sleep(0.5)
+            # Wait up to 1.5s for model farewell audio chunks to begin arriving and queueing in playback buffer
+            for _ in range(15):
+                if self.audio_manager.is_playback_active():
+                    break
+                await asyncio.sleep(0.1)
+
+            # Wait for audio to drain
             await self.audio_manager.wait_for_playback_drain(timeout=timeout)
         except Exception as e:
             logger.warning("[LiveCore] Shutdown drain wait warning: %s", e)
@@ -710,6 +725,16 @@ class AlfredLiveCore:
                     self.set_status("listening")
                     return
 
+            # 1b. Check user turn / audio transcription for executive termination command
+            user_turn = getattr(server_content, "user_turn", None)
+            if user_turn is not None:
+                for part in getattr(user_turn, "parts", []):
+                    u_text = getattr(part, "text", "") or ""
+                    if "terminate executive commands alfred" in u_text.lower():
+                        logger.warning("[ALFRED CORE] Termination directive detected in user speech transcription: '%s'", u_text)
+                        if not self._shutdown_pending:
+                            self.trigger_graceful_shutdown()
+
             # 2. Output audio chunks & transcripts
             model_turn = getattr(server_content, "model_turn", None)
             if model_turn is not None:
@@ -833,20 +858,28 @@ class AlfredLiveCore:
         await self.audio_manager.start()
 
         # Build LiveConnectConfig with audio modality, persona, and tools
-        config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"],
-            system_instruction=types.Content(
+        connect_kwargs: Dict[str, Any] = {
+            "response_modalities": ["AUDIO"],
+            "system_instruction": types.Content(
                 parts=[types.Part.from_text(text=get_dynamic_system_prompt(self.memory))]
             ),
-            speech_config=types.SpeechConfig(
+            "speech_config": types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
                         voice_name=self.voice_name
                     )
                 )
             ),
-            tools=self.tools_list,
-        )
+            "tools": self.tools_list,
+        }
+        if hasattr(types, "AudioTranscriptionConfig"):
+            try:
+                connect_kwargs["input_audio_transcription"] = types.AudioTranscriptionConfig()
+                connect_kwargs["output_audio_transcription"] = types.AudioTranscriptionConfig()
+            except Exception as ex:
+                logger.debug("Could not configure audio transcription config: %s", ex)
+
+        config = types.LiveConnectConfig(**connect_kwargs)
 
         logger.info("[ALFRED CORE] Connecting to Gemini Live API (%s)...", self.model_id)
         self.update_transcript(f"[LIVE API]: Connecting to Gemini Live API ({self.model_id})...")

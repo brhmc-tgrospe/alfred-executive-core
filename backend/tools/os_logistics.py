@@ -17,6 +17,9 @@ import sys
 import time
 import uuid
 import webbrowser
+import json
+import urllib.parse
+import urllib.request
 import logging
 from typing import Awaitable, Callable, Optional
 import psutil
@@ -25,6 +28,37 @@ from backend.memory.memory_store import MemoryStore, get_utc8_now_str
 from backend.vision_manager import VisionManager
 
 logger = logging.getLogger(__name__)
+
+WMO_WEATHER_DESCRIPTIONS = {
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Depositing rime fog",
+    51: "Light drizzle",
+    53: "Moderate drizzle",
+    55: "Dense drizzle",
+    56: "Light freezing drizzle",
+    57: "Dense freezing drizzle",
+    61: "Slight rain",
+    63: "Moderate rain",
+    65: "Heavy rain",
+    66: "Light freezing rain",
+    67: "Heavy freezing rain",
+    71: "Slight snow fall",
+    73: "Moderate snow fall",
+    75: "Heavy snow fall",
+    77: "Snow grains",
+    80: "Slight rain showers",
+    81: "Moderate rain showers",
+    82: "Violent rain showers",
+    85: "Slight snow showers",
+    86: "Heavy snow showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with slight hail",
+    99: "Thunderstorm with heavy hail",
+}
 
 # High-risk command patterns requiring explicit human authorization (catastrophic disk or system commands)
 HIGH_RISK_PATTERN = re.compile(
@@ -120,6 +154,120 @@ class OSLogistics:
             return "\n".join(diagnostics)
         except Exception as e:
             return f"Failed to retrieve system diagnostics: {e}"
+
+    def get_weather_briefing(
+        self,
+        location: str = "Legazpi City",
+        include_forecast: bool = True,
+    ) -> str:
+        """Retrieves real-time atmospheric weather telemetry, temperatures, conditions, and multi-day forecast.
+
+        Args:
+            location: Target city or municipality name (defaults to 'Legazpi City', Philippines).
+            include_forecast: If True, includes upcoming 3-day temperature range and precipitation probability.
+
+        Returns:
+            Formatted meteorological briefing with current temperatures, conditions, and forecasts in UTC+8.
+        """
+        clean_loc = location.strip() if location.strip() else "Legazpi City"
+        utc8_stamp = get_utc8_now_str()
+
+        # 1. Geocoding via Open-Meteo
+        geo_name = clean_loc
+        for suffix in [" City", " city"]:
+            if geo_name.endswith(suffix):
+                geo_name = geo_name[:-len(suffix)].strip()
+
+        lat, lon = None, None
+        name, admin1, country = geo_name, "", ""
+
+        for candidate in [geo_name, clean_loc, clean_loc.split()[0]]:
+            try:
+                encoded = urllib.parse.quote(candidate)
+                geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded}&count=1&language=en&format=json"
+                req = urllib.request.Request(geo_url, headers={"User-Agent": "AlfredExecutiveCore/1.0"})
+                with urllib.request.urlopen(req, timeout=4.0) as resp:
+                    data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                results = data.get("results", [])
+                if results:
+                    r = results[0]
+                    lat = r.get("latitude")
+                    lon = r.get("longitude")
+                    name = r.get("name", candidate)
+                    admin1 = r.get("admin1", "")
+                    country = r.get("country", "")
+                    break
+            except Exception as e:
+                logger.debug("[Weather] Geocoding candidate '%s' error: %s", candidate, e)
+
+        # 2. Forecast via Open-Meteo
+        if lat is not None and lon is not None:
+            try:
+                fc_url = (
+                    f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+                    f"&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,wind_speed_10m"
+                    f"&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+                    f"&timezone=Asia%2FManila"
+                )
+                req_fc = urllib.request.Request(fc_url, headers={"User-Agent": "AlfredExecutiveCore/1.0"})
+                with urllib.request.urlopen(req_fc, timeout=4.5) as resp_fc:
+                    fc = json.loads(resp_fc.read().decode("utf-8", errors="replace"))
+
+                current = fc.get("current", {})
+                temp = current.get("temperature_2m", "N/A")
+                feels_like = current.get("apparent_temperature", "N/A")
+                humidity = current.get("relative_humidity_2m", "N/A")
+                precip = current.get("precipitation", 0.0)
+                wind = current.get("wind_speed_10m", "N/A")
+                code = current.get("weather_code", 0)
+                condition = WMO_WEATHER_DESCRIPTIONS.get(code, "Fair / Clear")
+
+                loc_parts = [p for p in [name, admin1, country] if p]
+                loc_header = ", ".join(loc_parts) if loc_parts else clean_loc
+
+                lines = [
+                    f"[{utc8_stamp}] Executive Weather Telemetry — {loc_header}:",
+                    f"• Condition: {condition} (WMO Code {code})",
+                    f"• Temperature: {temp}°C (Apparent: {feels_like}°C)",
+                    f"• Relative Humidity: {humidity}%",
+                    f"• Wind Speed: {wind} km/h",
+                    f"• Precipitation: {precip} mm",
+                ]
+
+                if include_forecast:
+                    daily = fc.get("daily", {})
+                    dates = daily.get("time", [])[:3]
+                    codes = daily.get("weather_code", [])[:3]
+                    max_temps = daily.get("temperature_2m_max", [])[:3]
+                    min_temps = daily.get("temperature_2m_min", [])[:3]
+                    rain_probs = daily.get("precipitation_probability_max", [])[:3]
+
+                    if dates:
+                        lines.append("• 3-Day Forecast Outlook (PST/UTC+8):")
+                        for i, d in enumerate(dates):
+                            d_code = codes[i] if i < len(codes) else 0
+                            d_desc = WMO_WEATHER_DESCRIPTIONS.get(d_code, "Fair")
+                            t_max = max_temps[i] if i < len(max_temps) else "N/A"
+                            t_min = min_temps[i] if i < len(min_temps) else "N/A"
+                            prob = rain_probs[i] if i < len(rain_probs) else "N/A"
+                            lines.append(f"  - {d}: {d_desc} | {t_min}°C to {t_max}°C | Rain Risk: {prob}%")
+
+                return "\n".join(lines)
+            except Exception as e:
+                logger.warning("[Weather] Open-Meteo forecast failed: %s, falling back to wttr.in", e)
+
+        # 3. Fallback via wttr.in
+        try:
+            wttr_url = f"https://wttr.in/{urllib.parse.quote(clean_loc)}?format=%l:+%C,+%t+(feels+like+%f),+humidity:+%h,+wind:+%w"
+            req_wttr = urllib.request.Request(wttr_url, headers={"User-Agent": "curl/7.68.0"})
+            with urllib.request.urlopen(req_wttr, timeout=4.0) as resp_wttr:
+                raw_text = resp_wttr.read().decode("utf-8", errors="replace").strip()
+            clean_text = raw_text.replace("→", "E ").replace("←", "W ").replace("↑", "N ").replace("↓", "S ").replace("↗", "NE ").replace("↘", "SE ").replace("↖", "NW ").replace("↙", "SW ")
+            return f"[{utc8_stamp}] Executive Weather Telemetry (wttr.in fallback):\n• {clean_text}"
+        except Exception as ex:
+            logger.warning("[Weather] wttr.in fallback failed: %s", ex)
+
+        return f"[{utc8_stamp}] Meteorological Telemetry: Sensor link unavailable for '{clean_loc}'. Verify internet connection, Director Qadir."
 
     def inspect_learned_habits_and_growth(self, action: str = "summary", habit_note: str = "") -> str:
         """Inspects ALFRED's learned habits, Director preferences, and continuous adaptation metrics.

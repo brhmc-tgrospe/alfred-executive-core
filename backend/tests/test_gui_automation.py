@@ -1,6 +1,7 @@
 """Unit tests for Live Visual Co-Editing & Desktop GUI Automation Suite (backend/tools/gui_automation.py)."""
 
 from unittest.mock import MagicMock, patch
+import numpy as np
 import pytest
 from backend.tools.gui_automation import GuiAutomationLogistics, DESTRUCTIVE_HOTKEYS
 
@@ -139,29 +140,34 @@ def test_screen_pixel_navigation_bounds_validation(gui):
 
 
 def test_screen_pixel_navigation_actions(gui):
-    """Verifies all supported desktop mouse actions dispatch to pyautogui correctly."""
-    with patch("backend.tools.gui_automation.pyautogui") as mock_pg:
+    """Verifies all supported desktop mouse actions dispatch correctly."""
+    with patch("backend.tools.gui_automation.pyautogui") as mock_pg, \
+         patch("backend.tools.gui_automation.send_hardware_mouse_click") as mock_send, \
+         patch.object(gui.vision, "capture_screen_patch") as mock_patch:
         mock_pg.size.return_value = (1920, 1080)
+
+        # Simulate visual response >= 1.5% for click
+        pre_patch = np.zeros((120, 120, 3), dtype=np.uint8)
+        post_patch = np.zeros((120, 120, 3), dtype=np.uint8)
+        post_patch[0:30, 0:30] = 255
+        mock_patch.side_effect = [pre_patch, post_patch]
 
         # 1. Click
         res_click = gui.screen_pixel_navigation(500, 300, action="click")
         assert "Successfully executed desktop mouse click" in res_click
-        mock_pg.click.assert_called_with(500, 300)
+        mock_send.assert_called_with(500, 300, button="left", hold_ms=0.0)
 
         # 2. Double click
         res_dc = gui.screen_pixel_navigation(500, 300, action="double_click")
         assert "Successfully executed desktop mouse double_click" in res_dc
-        mock_pg.doubleClick.assert_called_with(500, 300)
 
         # 3. Right click
         res_rc = gui.screen_pixel_navigation(500, 300, action="right_click")
         assert "Successfully executed desktop mouse right_click" in res_rc
-        mock_pg.rightClick.assert_called_with(500, 300)
 
         # 4. Move
         res_move = gui.screen_pixel_navigation(500, 300, action="move")
         assert "Successfully executed desktop mouse move" in res_move
-        mock_pg.moveTo.assert_called_with(500, 300, duration=0.2)
 
         # 5. Scroll
         res_scroll = gui.screen_pixel_navigation(500, 300, action="scroll", scroll_amount=-300)

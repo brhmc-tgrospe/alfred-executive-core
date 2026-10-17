@@ -113,7 +113,7 @@ export function TelemetryBar({
     <header
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      className="w-full max-w-5xl mx-auto rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-cyan-500/30 px-4 py-2 shadow-[0_8px_32px_rgba(0,0,0,0.6)] flex flex-col gap-1.5 text-xs select-none transition-all duration-200"
+      className="hud-interactive w-full max-w-5xl mx-auto rounded-2xl bg-slate-950/85 backdrop-blur-xl border border-cyan-500/30 px-4 py-2 shadow-[0_8px_32px_rgba(0,0,0,0.6)] flex flex-col gap-1.5 text-xs select-none transition-all duration-200"
     >
       {/* Row 1: Brand, Status Badge, Active Tool (Left) | System Telemetry: CPU, RAM, PING, FPS (Right) */}
       <div className="w-full flex items-center justify-between gap-3">

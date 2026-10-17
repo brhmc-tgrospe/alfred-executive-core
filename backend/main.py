@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import subprocess
 import time
 from contextlib import asynccontextmanager
 import ctypes
@@ -44,7 +45,7 @@ def get_cursor_position() -> tuple[int, int]:
 
 from backend.audio_manager import AudioManager
 from backend.vision_manager import VisionManager
-from backend.memory.memory_store import MemoryStore
+from backend.memory.memory_store import MemoryStore, get_utc8_now_str
 from backend.tools.os_logistics import OSLogistics
 from backend.tools.dev_logistics import DevLogistics
 from backend.tools.gui_automation import GuiAutomationLogistics
@@ -138,7 +139,7 @@ class AlfredHubCoordinator:
             self.logistics.terminate_executive_commands,
             self.dev_logistics.inspect_git_workspace,
             self.dev_logistics.inspect_local_dev_ports,
-            self.dev_logistics.probe_network_target,
+            self.logistics.get_weather_briefing,
             self.dev_logistics.tail_log_file,
             self.dev_logistics.audit_source_file,
             self.dev_logistics.inspect_sqlite_database,
@@ -265,6 +266,10 @@ class AlfredHubCoordinator:
             async with self._lock:
                 self.connected_clients.difference_update(disconnected)
 
+    def trigger_graceful_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> None:
+        """Shared graceful shutdown trigger wired across live_core, logistics, and coordinator."""
+        self.schedule_shutdown(farewell_message)
+
     def schedule_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> None:
         """Schedules non-blocking graceful executive shutdown sequence."""
         asyncio.create_task(self.execute_system_shutdown(farewell_message))
@@ -277,6 +282,12 @@ class AlfredHubCoordinator:
             self.live_core.set_status("speaking")
             await self.broadcast_state_packet()
 
+        # Wait up to 1.5s for farewell speech chunks to begin arriving in playback buffer
+        for _ in range(15):
+            if self.audio.is_playback_active():
+                break
+            await asyncio.sleep(0.1)
+
         # Wait for audio playback buffer to drain completely
         try:
             await self.audio.wait_for_playback_drain(timeout=6.0)
@@ -285,11 +296,18 @@ class AlfredHubCoordinator:
 
         # Broadcast shutdown event to WebSocket clients (Electron HUD)
         await self.broadcast_shutdown(reason="Director Qadir termination command")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.4)
+
+        # Forcefully terminate Electron overlay process if running on Windows
+        if sys.platform.startswith("win"):
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "electron.exe"], capture_output=True)
+            except Exception as e:
+                logger.debug("taskkill electron error: %s", e)
 
         # Stop audio hardware streams
         try:
-            self.audio.stop()
+            await self.audio.stop()
         except Exception:
             pass
 
@@ -298,7 +316,7 @@ class AlfredHubCoordinator:
 
     async def _delayed_exit(self) -> None:
         """Small pause to let network packets flush before process exit."""
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.2)
         os._exit(0)
 
     async def broadcast_shutdown(self, reason: str = "Director Qadir termination command") -> None:

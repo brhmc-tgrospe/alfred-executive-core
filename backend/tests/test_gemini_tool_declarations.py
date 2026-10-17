@@ -38,7 +38,7 @@ def test_gemini_tool_declaration_parsing(tmp_path):
         mem.inspect_learned_habits_and_growth,
         dev.inspect_git_workspace,
         dev.inspect_local_dev_ports,
-        dev.probe_network_target,
+        logistics.get_weather_briefing,
         dev.tail_log_file,
         dev.audit_source_file,
         dev.inspect_sqlite_database,

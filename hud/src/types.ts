@@ -39,6 +39,8 @@ export interface ElectronAPI {
   onToggleLayoutMode?: (callback: () => void) => () => void;
   onSetLayoutMode?: (callback: (mode: LayoutMode) => void) => () => void;
   shutdownApp?: () => void;
+  forceClickThrough?: () => void;
+  onForceClickThrough?: (callback: () => void) => () => void;
 }
 
 declare global {
