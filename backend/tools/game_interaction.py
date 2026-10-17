@@ -314,13 +314,24 @@ class GameInteractionLogistics:
         """
         def _observe_worker():
             start_t = time.perf_counter()
+            t1 = start_t
             try:
-                frame, meta = self._capture_window_bgr(window_title)
+                frame1, meta = self._capture_window_bgr(window_title)
             except Exception:
-                # Fallback to simulated 720p frame for tests or headless environments
-                frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+                frame1 = np.zeros((720, 1280, 3), dtype=np.uint8)
                 meta = {"width": 1280, "height": 720, "rect": {}}
 
+            # Rapid 2-frame kinematic burst separated by dt ~= 35ms
+            time.sleep(0.035)
+            t2 = time.perf_counter()
+            dt = max(0.001, t2 - t1)
+
+            try:
+                frame2, _ = self._capture_window_bgr(window_title)
+            except Exception:
+                frame2 = frame1.copy()
+
+            frame = frame2
             h, w = frame.shape[:2]
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             var_lum = float(np.var(gray))
@@ -463,32 +474,70 @@ class GameInteractionLogistics:
 
                 self._previous_gameplay_hp = health_pct
 
-            # Target / Centroid Detection in central viewport
+            # Target / Centroid Detection & 2-Frame Kinematic Motion Tracking in central viewport
             center_x, center_y = w // 2, h // 2
             v_top, v_bottom = int(h * 0.20), int(h * 0.80)
             v_left, v_right = int(w * 0.20), int(w * 0.80)
-            viewport = frame[v_top:v_bottom, v_left:v_right]
 
-            gray_vp = cv2.cvtColor(viewport, cv2.COLOR_BGR2GRAY)
-            blurred = cv2.GaussianBlur(gray_vp, (5, 5), 0)
-            _, thresh = cv2.threshold(blurred, 160, 255, cv2.THRESH_BINARY)
-            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            def _extract_vp_targets(fr: np.ndarray) -> List[Dict[str, Any]]:
+                vp = fr[v_top:v_bottom, v_left:v_right]
+                g = cv2.cvtColor(vp, cv2.COLOR_BGR2GRAY)
+                b = cv2.GaussianBlur(g, (5, 5), 0)
+                _, th = cv2.threshold(b, 160, 255, cv2.THRESH_BINARY)
+                conts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                t_list = []
+                for c in conts:
+                    area = cv2.contourArea(c)
+                    if 120 < area < 25000:
+                        M = cv2.moments(c)
+                        if M["m00"] > 0:
+                            cx = int(M["m10"] / M["m00"]) + v_left
+                            cy = int(M["m01"] / M["m00"]) + v_top
+                            dist = round(math.sqrt((cx - center_x) ** 2 + (cy - center_y) ** 2), 1)
+                            t_list.append({"pos": [cx, cy], "distance_to_crosshair": dist, "area_px": int(area)})
+                return t_list
 
+            targets_f1 = _extract_vp_targets(frame1)
+            targets_f2 = _extract_vp_targets(frame2)
+
+            lead_time_sec = 0.20
             targets: List[Dict[str, Any]] = []
-            for idx, c in enumerate(contours):
-                area = cv2.contourArea(c)
-                if 120 < area < 25000:
-                    M = cv2.moments(c)
-                    if M["m00"] > 0:
-                        cx = int(M["m10"] / M["m00"]) + v_left
-                        cy = int(M["m01"] / M["m00"]) + v_top
-                        dist = round(math.sqrt((cx - center_x) ** 2 + (cy - center_y) ** 2), 1)
-                        targets.append({
-                            "target_id": idx + 1,
-                            "pos": [cx, cy],
-                            "distance_to_crosshair": dist,
-                            "area_px": int(area),
-                        })
+
+            for idx, t2_item in enumerate(targets_f2):
+                cx2, cy2 = t2_item["pos"]
+                dist = t2_item["distance_to_crosshair"]
+                area = t2_item["area_px"]
+
+                # Match with closest target in frame1 within 160px
+                vx, vy = 0.0, 0.0
+                best_match = None
+                best_dist = 160.0
+                for t1_item in targets_f1:
+                    cx1, cy1 = t1_item["pos"]
+                    d = math.hypot(cx2 - cx1, cy2 - cy1)
+                    if d < best_dist:
+                        best_dist = d
+                        best_match = t1_item
+
+                if best_match is not None:
+                    cx1, cy1 = best_match["pos"]
+                    vx = round((cx2 - cx1) / dt, 1)
+                    vy = round((cy2 - cy1) / dt, 1)
+
+                speed = round(math.hypot(vx, vy), 1)
+                pred_x = max(0, min(w - 1, cx2 + int(vx * lead_time_sec)))
+                pred_y = max(0, min(h - 1, cy2 + int(vy * lead_time_sec)))
+
+                targets.append({
+                    "target_id": idx + 1,
+                    "pos": [cx2, cy2],
+                    "distance_to_crosshair": dist,
+                    "area_px": int(area),
+                    "velocity_px_s": [vx, vy],
+                    "speed_px_s": speed,
+                    "predictive_intercept": [pred_x, pred_y],
+                    "lead_time_sec": lead_time_sec,
+                })
 
             targets.sort(key=lambda t: t["distance_to_crosshair"])
             nearest_targets = targets[:4]
@@ -540,6 +589,7 @@ class GameInteractionLogistics:
                 },
                 "target_count": len(nearest_targets),
                 "nearest_targets": nearest_targets,
+                "tracked_targets": nearest_targets,
                 "tactical_state": tactical_state,
             }
             self._last_observation = observation
@@ -579,6 +629,14 @@ class GameInteractionLogistics:
             res = hud.get("resource_percent", 100.0)
             targets = obs.get("nearest_targets", [])
             has_close_target = any(t.get("distance_to_crosshair", 999) < 130 for t in targets)
+
+            # Predictive lead targeting
+            lead_info = ""
+            if targets:
+                t0 = targets[0]
+                if t0.get("speed_px_s", 0.0) > 10.0:
+                    lead_coords = t0.get("predictive_intercept", t0.get("pos", [0, 0]))
+                    lead_info = f" Kinetic lead engaged: target moving at {t0.get('velocity_px_s', [0, 0])} px/s. Predictive intercept at {lead_coords}."
 
             genre = game_genre.strip().lower()
             policy_decision: str = ""
@@ -644,6 +702,9 @@ class GameInteractionLogistics:
                     policy_decision = "SCOUT_AND_EXPAND"
                     action_sequence = "tab,mouse_right"
                     rationale = "Surveying perimeter fog of war."
+
+            if lead_info:
+                rationale += lead_info
 
             execution_result = "Not requested (auto_execute=False)."
             if auto_execute and action_sequence:

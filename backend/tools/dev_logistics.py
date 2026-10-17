@@ -23,18 +23,77 @@ import socket
 import sqlite3
 import subprocess
 import time
-from typing import List, Set
+from typing import Any, Dict, List, Optional, Set
 import psutil
+import httpx
+from bs4 import BeautifulSoup
+
+from backend.vision_manager import VisionManager
 
 # Standard developer service ports
 COMMON_DEV_PORTS: Set[int] = {80, 443, 3000, 5173, 8000, 8080, 3306, 8765}
+
+# High-speed built-in shortcut and icon dictionary for executive interfaces
+SOFTWARE_SHORTCUTS_AND_ICONS: Dict[str, Dict[str, str]] = {
+    "word": {
+        "save": "Ctrl+S (Save active document / floppy disk icon)",
+        "bold": "Ctrl+B (Toggle bold on selection / 'B' icon in Home ribbon)",
+        "italic": "Ctrl+I (Toggle italics / 'I' icon in Home ribbon)",
+        "underline": "Ctrl+U (Toggle underline / 'U' icon)",
+        "track changes": "Ctrl+Shift+E (Review ribbon -> Tracking -> Track Changes)",
+        "comment": "Ctrl+Alt+M (Insert new comment / speech bubble icon with +)",
+        "find": "Ctrl+F (Navigation pane / magnifying glass icon)",
+        "replace": "Ctrl+H (Find and replace dialog)",
+        "heading 1": "Ctrl+Alt+1 (Apply Heading 1 style)",
+        "heading 2": "Ctrl+Alt+2 (Apply Heading 2 style)",
+        "ribbon": "Alt or F10 (Activates ribbon access keys: Alt+H Home, Alt+N Insert, Alt+P Layout, Alt+R Review)",
+        "undo": "Ctrl+Z (Curved arrow pointing left)",
+        "redo": "Ctrl+Y (Curved arrow pointing right)",
+        "word count": "Ctrl+Shift+G (Review ribbon -> Word Count)",
+    },
+    "excel": {
+        "autosum": "Alt+= (Sigma ∑ icon in Editing group / AutoSum)",
+        "filter": "Ctrl+Shift+L (Data ribbon -> Filter funnel icon)",
+        "pivottable": "Alt+N+V (Insert -> PivotTable grid table icon)",
+        "freeze panes": "Alt+W+F (View ribbon -> Freeze Panes with split line icon)",
+        "format cells": "Ctrl+1 (Opens Format Cells dialog)",
+        "insert row": "Ctrl+Shift++ (with row selected)",
+        "delete row": "Ctrl+- (with row selected)",
+        "flash fill": "Ctrl+E (Data ribbon -> Flash Fill lightning icon)",
+        "save": "Ctrl+S (Floppy disk icon)",
+        "sort": "Data -> Sort A to Z or Z to A icons",
+    },
+    "vscode": {
+        "command palette": "Ctrl+Shift+P or F1 (Top central search bar)",
+        "quick open": "Ctrl+P (Search files by name)",
+        "toggle terminal": "Ctrl+` (Backtick - opens/closes integrated terminal)",
+        "source control": "Ctrl+Shift+G (Git branch icon on activity bar)",
+        "multi cursor": "Alt+Click or Ctrl+Alt+Up/Down",
+        "format document": "Shift+Alt+F (Formats active source file)",
+        "comment line": "Ctrl+/ (Toggles line comment)",
+        "split editor": "Ctrl+\\ (Split editor right icon in tab corner)",
+        "zen mode": "Ctrl+K Z (Full screen zen distraction-free mode)",
+        "find in files": "Ctrl+Shift+F (Magnifying glass in activity bar)",
+    },
+    "browser": {
+        "inspect": "Ctrl+Shift+I or F12 (Opens Chrome/Edge DevTools)",
+        "hard refresh": "Ctrl+F5 or Ctrl+Shift+R (Bypasses cache)",
+        "reopen closed tab": "Ctrl+Shift+T (Restores last closed tab)",
+        "new incognito": "Ctrl+Shift+N (Private browsing window)",
+        "dev tools console": "Ctrl+Shift+J (Directly opens DevTools Console tab)",
+        "toggle device toolbar": "Ctrl+Shift+M (Mobile responsive simulator)",
+        "clear browsing data": "Ctrl+Shift+Del",
+        "downloads": "Ctrl+J",
+        "bookmark": "Ctrl+D (Star icon in address bar)",
+    },
+}
 
 
 class DevLogistics:
     """Developer logistics tools for repository analysis, port auditing, and network diagnostics."""
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, vision_manager: Optional[VisionManager] = None) -> None:
+        self.vision = vision_manager or VisionManager()
 
     def inspect_git_workspace(self, repo_path: str = ".") -> str:
         """Inspects the local git repository: active branch, status, diff summary, and recent commits.
@@ -448,3 +507,107 @@ class DevLogistics:
             lines.append(f"• {r['host']:<18} -> {r['ip']:<15} | Port {port} | Latency: {lat_str:<9} | {status_tag}")
 
         return "\n".join(lines)
+
+    def research_software_interface_and_docs(
+        self, application_name: str, feature_or_icon_query: str, probe_hover_tooltip: bool = False
+    ) -> str:
+        """Researches official documentation, keyboard shortcuts, and UI icon meanings for complex software interfaces.
+
+        Combines a high-speed cached shortcut/icon knowledge base (covering Word, Excel, VS Code, browsers)
+        with live web manual scraping for unfamiliar applications. Can probe and capture native tooltips.
+
+        Args:
+            application_name: Name of target software (e.g. 'Word', 'Excel', 'VS Code', 'Chrome', 'Blender').
+            feature_or_icon_query: Specific tool, icon, ribbon tab, or action to look up (e.g. 'track changes', 'autosum', 'toggle terminal').
+            probe_hover_tooltip: If True, hovers at cursor for 450ms and captures a 2.0x Cursor Magnifier frame for tooltip inspection.
+
+        Returns:
+            Concise operational manual instructions and verified keyboard shortcuts.
+        """
+        app_clean = application_name.strip()
+        query_clean = feature_or_icon_query.strip()
+        if not app_clean or not query_clean:
+            return "Error: Both application_name and feature_or_icon_query must be provided."
+
+        app_lower = app_clean.lower()
+        query_lower = query_clean.lower()
+
+        # 1. Match against built-in high-speed knowledge base
+        matched_category = None
+        if "word" in app_lower:
+            matched_category = "word"
+        elif "excel" in app_lower:
+            matched_category = "excel"
+        elif any(k in app_lower for k in ("code", "vs", "antigravity")):
+            matched_category = "vscode"
+        elif any(k in app_lower for k in ("chrome", "edge", "browser", "firefox", "brave")):
+            matched_category = "browser"
+
+        doc_result = None
+        source_label = "Built-in High-Speed Interface Cache"
+
+        if matched_category and matched_category in SOFTWARE_SHORTCUTS_AND_ICONS:
+            cat_dict = SOFTWARE_SHORTCUTS_AND_ICONS[matched_category]
+            # Exact or fuzzy match on query key
+            for key, val in cat_dict.items():
+                if key in query_lower or query_lower in key:
+                    doc_result = f"• Action/Feature: {key.title()}\n• Shortcut / UI Guidance: {val}"
+                    break
+
+        # 2. Live Web Documentation Scraper fallback if not in built-in cache
+        if not doc_result:
+            source_label = "Live Documentation Scraper"
+            try:
+                search_query = f"{app_clean} {query_clean} shortcut manual documentation"
+                url = f"https://html.duckduckgo.com/html/?q={search_query.replace(' ', '+')}"
+                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ALFRED-Executive-Core/1.0"}
+                resp = httpx.get(url, headers=headers, timeout=4.0, follow_redirects=True)
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    snippets = []
+                    for res in soup.find_all("a", class_="result__snippet", limit=3):
+                        txt = res.get_text(strip=True)
+                        if txt:
+                            snippets.append(txt)
+                    if not snippets:
+                        for el in soup.find_all(["p", "li", "main"], limit=5):
+                            txt = el.get_text(strip=True)
+                            if len(txt) > 20:
+                                snippets.append(txt)
+                                if len(snippets) >= 2:
+                                    break
+                    if snippets:
+                        joined_snippets = " ".join(snippets)[:450]
+                        doc_result = f"• Retrieved Manual Snippet: {joined_snippets}\n• Search Target: '{search_query}'"
+            except Exception as e:
+                # Graceful offline fallback
+                doc_result = (
+                    f"• Standard Guidance: In {app_clean}, look for '{query_clean}' under the main menu bar or search with F1/Ctrl+Shift+P.\n"
+                    f"• Diagnostic note: Web scraper offline/timeout ({e})."
+                )
+
+        if not doc_result:
+            doc_result = (
+                f"• Guidance: Navigate to {app_clean} menu options or settings, or press Alt to reveal ribbon/menu access keys for '{query_clean}'."
+            )
+
+        output_lines = [
+            f"=== Software Interface & Manual Analysis ===",
+            f"• Target Application: {app_clean}",
+            f"• Query: '{query_clean}'",
+            f"• Knowledge Source: {source_label}",
+            doc_result,
+        ]
+
+        # 3. Native Hover Tooltip Probe (Constraint 5b)
+        if probe_hover_tooltip:
+            try:
+                time.sleep(0.45)  # 450ms hover pause for native OS tooltip to render
+                self.vision.capture_cursor_magnifier_jpeg()
+                output_lines.append(
+                    "• [Visual Tooltip Probe]: 450ms cursor hover executed. 2.0x Cursor Magnifier frame captured and injected for tooltip OCR inspection."
+                )
+            except Exception as err:
+                output_lines.append(f"• [Visual Tooltip Probe]: Failed to capture tooltip frame: {err}")
+
+        return "\n".join(output_lines)

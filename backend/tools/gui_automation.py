@@ -16,7 +16,9 @@ import logging
 import os
 import subprocess
 import time
-from typing import Optional, List
+from typing import Any, Dict, List, Optional, Tuple
+
+from backend.vision_manager import VisionManager
 
 try:
     import pyautogui
@@ -79,8 +81,8 @@ def get_live_cursor_coords() -> tuple[int, int]:
 class GuiAutomationLogistics:
     """Desktop GUI automation and visual co-editing suite."""
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, vision_manager: Optional[VisionManager] = None) -> None:
+        self.vision = vision_manager or VisionManager()
 
     def _find_window(self, app_name: str) -> Optional[Any]:
         """Finds the first visible window whose title contains app_name (case-insensitive)."""
@@ -356,20 +358,157 @@ class GuiAutomationLogistics:
         except Exception as e:
             return f"Error sending hotkey combo '{hotkey_combo}': {e}"
 
-    def screen_pixel_navigation(
-        self,
-        x: int,
-        y: int,
-        action: str = "click",
-        scroll_amount: int = 0,
-    ) -> str:
-        """Performs precise desktop mouse actions at specific (x, y) screen pixel coordinates.
+    def resolve_window_occlusion(self, target_window_title: str) -> dict:
+        """Inspects window Z-order and resolves any occluding/overlapping windows over the target window.
+
+        Uses win32gui.EnumWindows to traverse top-level windows in Z-order. If any non-HUD window
+        overlaps the target window's bounding box, automatically brings the target window to the
+        foreground (SW_RESTORE / SetForegroundWindow) before capturing or clicking.
 
         Args:
-            x: Horizontal pixel coordinate on the desktop screen. Pass -1 to target current cursor position.
-            y: Vertical pixel coordinate on the desktop screen. Pass -1 to target current cursor position.
+            target_window_title: Substring of the window title to ensure is unobstructed and visible.
+
+        Returns:
+            Dictionary containing occlusion status, overlapping window titles, action taken, and window rect.
+        """
+        clean_target = target_window_title.strip()
+        if not clean_target or clean_target.lower() == "active":
+            target_win = self._find_window("") or (gw.getActiveWindow() if gw else None)
+            if target_win:
+                clean_target = getattr(target_win, "title", "active")
+
+        result: Dict[str, Any] = {
+            "target_window": clean_target,
+            "target_found": False,
+            "occluded": False,
+            "is_occluded": False,
+            "occluding_windows": [],
+            "occluded_by": [],
+            "action_taken": "none",
+            "foreground_action": "none",
+            "rect": None,
+        }
+
+        if win32gui is None or not sys.platform.startswith("win"):
+            target_w = self._find_window(clean_target)
+            if target_w:
+                self._activate_window(target_w)
+                result["target_found"] = True
+                result["action_taken"] = "brought_to_foreground"
+                result["foreground_action"] = "Brought target window to foreground"
+                result["rect"] = [target_w.left, target_w.top, target_w.right, target_w.bottom]
+            return result
+
+        try:
+            target_hwnd = None
+            target_rect = None
+            target_title = clean_target
+            windows_above_target: List[Tuple[Any, str, Tuple[int, int, int, int]]] = []
+
+            def _enum_z_order(hwnd: Any, extra: Any) -> bool:
+                nonlocal target_hwnd, target_rect, target_title
+                if not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+                    return True
+                title = win32gui.GetWindowText(hwnd).strip()
+                rect = win32gui.GetWindowRect(hwnd)
+                w, h = rect[2] - rect[0], rect[3] - rect[1]
+                if w < 20 or h < 20:
+                    return True
+
+                if target_hwnd is None:
+                    if clean_target.lower() in title.lower():
+                        target_hwnd = hwnd
+                        target_rect = rect
+                        target_title = title
+                    else:
+                        lower_t = title.lower()
+                        if "program manager" not in lower_t and "alfred" not in lower_t:
+                            windows_above_target.append((hwnd, title, rect))
+                return True
+
+            win32gui.EnumWindows(_enum_z_order, None)
+
+            if target_hwnd is None:
+                def _find_minimized(hwnd: Any, extra: Any) -> bool:
+                    nonlocal target_hwnd, target_title
+                    title = win32gui.GetWindowText(hwnd).strip()
+                    if clean_target.lower() in title.lower():
+                        target_hwnd = hwnd
+                        target_title = title
+                    return True
+
+                win32gui.EnumWindows(_find_minimized, None)
+                if target_hwnd:
+                    win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+                    win32gui.SetForegroundWindow(target_hwnd)
+                    time.sleep(0.08)
+                    target_rect = win32gui.GetWindowRect(target_hwnd)
+                    result["target_found"] = True
+                    result["target_window"] = target_title
+                    result["action_taken"] = "restored_and_focused"
+                    result["foreground_action"] = "Restored and focused minimized target window"
+                    result["rect"] = list(target_rect)
+                    return result
+
+                result["action_taken"] = "window_not_found"
+                return result
+
+            result["target_found"] = True
+            result["target_window"] = target_title
+            result["rect"] = list(target_rect)
+            tx1, ty1, tx2, ty2 = target_rect
+
+            # Check bounding-box intersection with windows positioned above in Z-order
+            occluding = []
+            for ahwnd, atitle, arect in windows_above_target:
+                ax1, ay1, ax2, ay2 = arect
+                ix1 = max(tx1, ax1)
+                iy1 = max(ty1, ay1)
+                ix2 = min(tx2, ax2)
+                iy2 = min(ty2, ay2)
+                if ix2 > ix1 and iy2 > iy1:
+                    occluding.append(atitle)
+
+            if occluding:
+                result["occluded"] = True
+                result["is_occluded"] = True
+                result["occluding_windows"] = occluding
+                result["occluded_by"] = occluding
+                try:
+                    win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+                    win32gui.SetForegroundWindow(target_hwnd)
+                    time.sleep(0.08)
+                    result["action_taken"] = "brought_to_foreground"
+                    result["foreground_action"] = "Brought target window to foreground"
+                except Exception as ex:
+                    logger.warning("Failed to bring target window to foreground: %s", ex)
+                    result["action_taken"] = f"focus_failed: {ex}"
+            else:
+                result["action_taken"] = "none"
+                result["foreground_action"] = "Window is already unobstructed in foreground"
+
+            return result
+        except Exception as e:
+            logger.error("Error in resolve_window_occlusion: %s", e)
+            result["action_taken"] = f"error: {e}"
+            return result
+
+    def screen_pixel_navigation(
+        self,
+        x: int = -1,
+        y: int = -1,
+        action: str = "click",
+        scroll_amount: int = 0,
+        target_label_or_tag: str = "",
+    ) -> str:
+        """Performs precise desktop mouse actions at specific (x, y) screen coordinates or Set-of-Marks tags.
+
+        Args:
+            x: Horizontal pixel coordinate. Pass -1 to target current cursor position or when using target_label_or_tag.
+            y: Vertical pixel coordinate. Pass -1 to target current cursor position or when using target_label_or_tag.
             action: Action to perform: 'click', 'double_click', 'right_click', 'move', 'scroll'.
             scroll_amount: Number of scroll ticks for 'scroll' action (positive scrolls up, negative down).
+            target_label_or_tag: Optional Set-of-Marks tag ('#12') or control label to auto-resolve to (x, y).
 
         Returns:
             Confirmation report indicating the pixel interaction executed.
@@ -377,7 +516,26 @@ class GuiAutomationLogistics:
         if pyautogui is None:
             return "Error: pyautogui is unavailable on this host."
 
-        # Support live cursor auto-targeting when coordinates are (-1, -1) or user says 'click where my mouse is'
+        # 1. Resolve Set-of-Marks Tag or Label if provided
+        if target_label_or_tag:
+            tag_clean = target_label_or_tag.strip().lower()
+            cache = self.vision.get_som_cache()
+            if tag_clean not in cache and f"#{tag_clean}" not in cache:
+                try:
+                    self.vision.detect_ui_elements_and_annotate_grid()
+                    cache = self.vision.get_som_cache()
+                except Exception as ex:
+                    logger.warning("SoM grid detection failed: %s", ex)
+
+            entry = cache.get(tag_clean) or cache.get(f"#{tag_clean}")
+            if entry and "center" in entry:
+                cx, cy = entry["center"]
+                x, y = int(cx), int(cy)
+                logger.info("[Pixel Navigation] Resolved '%s' to center coordinates (%d, %d)", target_label_or_tag, x, y)
+            else:
+                return f"Error: Could not resolve Set-of-Marks tag or label '{target_label_or_tag}' on active screen."
+
+        # 2. Support live cursor auto-targeting when coordinates are (-1, -1) or user says 'click where my mouse is'
         if x == -1 and y == -1:
             x, y = get_live_cursor_coords()
 
@@ -401,7 +559,8 @@ class GuiAutomationLogistics:
             else:
                 return f"Error: Unsupported mouse action '{action}'. Supported: 'click', 'double_click', 'right_click', 'move', 'scroll'."
 
-            return f"Successfully executed desktop mouse {act} at coordinates ({x}, {y})."
+            tag_note = f" (target: '{target_label_or_tag}')" if target_label_or_tag else ""
+            return f"Successfully executed desktop mouse {act} at coordinates ({x}, {y}){tag_note}."
         except Exception as e:
             logger.error("Error executing screen_pixel_navigation: %s", e)
             return f"Error performing mouse action at ({x}, {y}): {e}"
@@ -456,6 +615,16 @@ class GuiAutomationLogistics:
 
         if not window_title.strip():
             return "Error: window_title parameter cannot be empty."
+
+        if act in ("resolve_occlusion", "unblock", "bring_to_foreground", "unocclude"):
+            report = self.resolve_window_occlusion(window_title)
+            return (
+                f"=== Occlusion Assessment for '{report.get('target_window', window_title)}' ===\n"
+                f"• Target Found: {report.get('target_found', False)}\n"
+                f"• Occluded: {report.get('occluded', False)}\n"
+                f"• Occluding Windows: {', '.join(report.get('occluding_windows', [])) or 'None'}\n"
+                f"• Action Taken: {report.get('foreground_action', report.get('action_taken', 'none'))}"
+            )
 
         target = window_title.strip().lower()
 
@@ -541,10 +710,22 @@ class GuiAutomationLogistics:
                 self._activate_window(target_win)
                 return f"Successfully focused and brought window '{matched_title}' to foreground."
 
+            elif act in ("resolve_occlusion", "clear_occlusion", "unocclude"):
+                res = self.resolve_window_occlusion(matched_title)
+                occ_status = "Occluded" if res["occluded"] else "Unobstructed"
+                occ_list = ", ".join(res["occluding_windows"]) if res["occluding_windows"] else "None"
+                return (
+                    f"Z-Order Occlusion Analysis for '{res['target_window']}':\n"
+                    f"• Status: {occ_status}\n"
+                    f"• Obstructing Windows: {occ_list}\n"
+                    f"• Action Taken: {res['action_taken']}\n"
+                    f"• Rect: {res['rect']}"
+                )
+
             else:
                 return (
                     f"Error: Unsupported window action '{action}'. "
-                    f"Supported actions: 'close', 'close_tab', 'minimize', 'maximize', 'restore', 'focus'."
+                    f"Supported actions: 'close', 'close_tab', 'minimize', 'maximize', 'restore', 'focus', 'resolve_occlusion'."
                 )
 
         except Exception as e:

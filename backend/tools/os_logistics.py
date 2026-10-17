@@ -17,11 +17,14 @@ import sys
 import time
 import uuid
 import webbrowser
+import logging
 from typing import Awaitable, Callable, Optional
 import psutil
 
 from backend.memory.memory_store import MemoryStore, get_utc8_now_str
 from backend.vision_manager import VisionManager
+
+logger = logging.getLogger(__name__)
 
 # High-risk command patterns requiring explicit human authorization (catastrophic disk or system commands)
 HIGH_RISK_PATTERN = re.compile(
@@ -44,12 +47,18 @@ class OSLogistics:
         vision_manager: Optional[VisionManager] = None,
         approval_hook: Optional[Callable[[dict], Awaitable[None]]] = None,
         approval_timeout: float = 30.0,
+        shutdown_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.memory = memory_store or MemoryStore()
         self.vision = vision_manager or VisionManager()
         self.approval_hook = approval_hook
         self.approval_timeout = approval_timeout
+        self._shutdown_callback = shutdown_callback
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
+
+    def set_shutdown_callback(self, cb: Callable[[str], None]) -> None:
+        """Configures callback invoked when terminate_executive_commands is called."""
+        self._shutdown_callback = cb
 
     def is_high_risk_command(self, command: str) -> bool:
         """Determines if a shell command carries risk of data loss or process termination."""
@@ -186,6 +195,45 @@ class OSLogistics:
             Status briefing from the executive agenda database.
         """
         return self.memory.manage_executive_briefing(action=action, task_item=task_item)
+
+    def manage_semantic_memory(self, action: str, text_or_query: str, category: str = "general") -> str:
+        """Stores or retrieves facts, preferences, and context from long-term semantic memory.
+
+        Args:
+            action: Memory action to perform: 'remember' (store fact/preference) or 'recall' (search memory).
+            text_or_query: The statement/fact to store when action is 'remember', or the search query when action is 'recall'.
+            category: Classification tag (e.g. 'preference', 'project', 'client', 'system') when action is 'remember'.
+
+        Returns:
+            Confirmation of storage or relevant retrieved memory excerpts.
+        """
+        act = action.strip().lower()
+        if act in ("remember", "store", "save", "write", "memorize"):
+            return self.memory.remember_fact(category=category, content=text_or_query)
+        elif act in ("recall", "search", "query", "find", "retrieve"):
+            return self.memory.recall_context(query=text_or_query)
+        else:
+            return f"Error: Unknown memory action '{action}'. Use 'remember' or 'recall'."
+
+    def terminate_executive_commands(
+        self,
+        farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.",
+    ) -> str:
+        """Gracefully halts all executive commands, drains speech playback, and initiates system shutdown.
+
+        Args:
+            farewell_message: Spoken parting statement to Director Qadir before process termination.
+
+        Returns:
+            Confirmation statement initiating executive shutdown sequence.
+        """
+        logger.info("[OS Logistics] Terminate executive commands requested: '%s'", farewell_message)
+        if hasattr(self, "_shutdown_callback") and self._shutdown_callback is not None:
+            try:
+                self._shutdown_callback(farewell_message)
+            except Exception as e:
+                logger.error("Shutdown callback error: %s", e)
+        return farewell_message
 
     def remember_fact(self, category: str, content: str) -> str:
         """Stores a persistent fact or preference into semantic vector memory.

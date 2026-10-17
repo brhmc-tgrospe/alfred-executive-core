@@ -12,8 +12,15 @@ import ctypes
 import io
 import logging
 import sys
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+import cv2
+import numpy as np
 from PIL import Image, ImageDraw
+
+try:
+    import win32gui
+except ImportError:
+    win32gui = None
 
 logger = logging.getLogger("AlfredVision")
 
@@ -52,6 +59,7 @@ class VisionManager:
         self.target_width = target_width
         self.jpeg_quality = jpeg_quality
         self._last_frame: Optional[bytes] = None
+        self._som_cache: Dict[str, Any] = {}
 
     def _generate_fallback_image(self, message: str = "A.L.F.R.E.D. Vision: Session Locked/Non-Interactive") -> Image.Image:
         """Generates a diagnostic fallback frame when Windows desktop GDI is inaccessible."""
@@ -211,7 +219,198 @@ class VisionManager:
         zoomed_img.save(buffer, format="JPEG", quality=95, optimize=True)
         return buffer.getvalue()
 
+    _som_cache: Dict[str, Any] = {}
+
     def get_image_dimensions(self, jpeg_bytes: bytes) -> Tuple[int, int]:
         """Utility helper to parse image dimensions from JPEG bytes without full decode."""
         with Image.open(io.BytesIO(jpeg_bytes)) as img:
             return img.width, img.height
+
+    def capture_screen_raw(self, monitor_index: int = 1) -> Image.Image:
+        """Captures raw uncompressed PIL Image of the screen or monitor."""
+        return self._grab_raw_image(monitor_index=monitor_index)
+
+    def get_som_cache(self) -> Dict[str, Any]:
+        """Returns the cached Set-of-Marks mapping tags and control labels to pixel coordinates."""
+        return VisionManager._som_cache or getattr(self, "_som_cache", {})
+
+    def detect_ui_elements_and_annotate_grid(
+        self, window_title: str = "active", monitor_index: int = 1
+    ) -> Tuple[bytes, Dict[str, Any]]:
+        """Uses OpenCV adaptive thresholding, Canny edges, and contour clustering (plus Win32 controls)
+
+        to detect interactive buttons, icons, tabs, and inputs on custom or unfamiliar software UIs.
+        Draws numbered cyan Set-of-Marks tags (#1, #2, ...) and a 10x10 spatial grid onto the frame,
+        caching a lookup dictionary mapping each tag and control label to its exact center pixel (x, y).
+
+        Args:
+            window_title: Window title or 'active' for current foreground window.
+            monitor_index: Display index to capture (default: 1).
+
+        Returns:
+            Tuple of (annotated_jpeg_bytes, som_lookup_dict).
+        """
+        raw_pil = self.capture_screen_raw(monitor_index=monitor_index)
+        img_np = np.array(raw_pil.convert("RGB"))
+        bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        h, w = bgr.shape[:2]
+
+        # 1. Edge & Adaptive Thresholding for UI contours
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        thresh = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2
+        )
+        edges = cv2.Canny(gray, 50, 150)
+        combined = cv2.bitwise_or(thresh, edges)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        dilated = cv2.dilate(combined, kernel, iterations=1)
+        contours, _ = cv2.findContours(dilated, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+        candidate_boxes: List[Tuple[int, int, int, int, str]] = []
+        min_w, max_w = 16, int(w * 0.45)
+        min_h, max_h = 14, int(h * 0.25)
+
+        for c in contours:
+            bx, by, bw, bh = cv2.boundingRect(c)
+            area = bw * bh
+            aspect = bw / float(bh) if bh > 0 else 0
+            if (min_w <= bw <= max_w) and (min_h <= bh <= max_h) and (200 <= area <= 60000) and (0.15 <= aspect <= 7.5):
+                candidate_boxes.append((bx, by, bw, bh, ""))
+
+        # 2. Win32 Child Windows (if available on Windows)
+        if win32gui is not None and sys.platform.startswith("win"):
+            try:
+                target_hwnd = None
+                if window_title == "active":
+                    target_hwnd = win32gui.GetForegroundWindow()
+                else:
+                    def _find_target(hwnd, extra):
+                        if win32gui.IsWindowVisible(hwnd):
+                            txt = win32gui.GetWindowText(hwnd)
+                            if window_title.lower() in txt.lower():
+                                extra.append(hwnd)
+                        return True
+                    found = []
+                    win32gui.EnumWindows(_find_target, found)
+                    if found:
+                        target_hwnd = found[0]
+
+                if target_hwnd and win32gui.IsWindow(target_hwnd):
+                    child_hwnds = []
+                    def _enum_ch(chwnd, extra):
+                        if win32gui.IsWindowVisible(chwnd):
+                            extra.append(chwnd)
+                        return True
+                    try:
+                        win32gui.EnumChildWindows(target_hwnd, _enum_ch, child_hwnds)
+                    except Exception:
+                        pass
+
+                    for ch in child_hwnds:
+                        try:
+                            crect = win32gui.GetWindowRect(ch)
+                            cx1, cy1, cx2, cy2 = crect
+                            cw, ch_h = cx2 - cx1, cy2 - cy1
+                            ctext = win32gui.GetWindowText(ch).strip()
+                            if 14 <= cw <= max_w and 14 <= ch_h <= max_h and 0 <= cx1 < w and 0 <= cy1 < h:
+                                candidate_boxes.append((cx1, cy1, cw, ch_h, ctext))
+                        except Exception:
+                            continue
+            except Exception as e:
+                logger.debug("Win32 child window inspection skipped: %s", e)
+
+        # 3. Non-Maximum Suppression (NMS) to eliminate duplicate/contained candidate boxes
+        candidate_boxes.sort(key=lambda b: (b[2] * b[3]), reverse=True)
+        filtered_boxes: List[Tuple[int, int, int, int, str]] = []
+        for box in candidate_boxes:
+            bx, by, bw, bh, _ = box
+            overlap = False
+            for fb in filtered_boxes:
+                fx, fy, fw, fh, _ = fb
+                ix1 = max(bx, fx)
+                iy1 = max(by, fy)
+                ix2 = min(bx + bw, fx + fw)
+                iy2 = min(by + bh, fy + fh)
+                if ix2 > ix1 and iy2 > iy1:
+                    inter_area = (ix2 - ix1) * (iy2 - iy1)
+                    box_area = bw * bh
+                    fb_area = fw * fh
+                    iou = inter_area / float(box_area + fb_area - inter_area)
+                    if iou > 0.40 or (inter_area / float(box_area)) > 0.70:
+                        overlap = True
+                        break
+            if not overlap:
+                filtered_boxes.append(box)
+
+        # Sort spatially in natural reading order (top-to-bottom, left-to-right)
+        filtered_boxes.sort(key=lambda b: (int(b[1] / 50) * 50, b[0]))
+        selected_boxes = filtered_boxes[:60]
+
+        annotated = bgr.copy()
+        som_dict: Dict[str, Any] = {}
+
+        # 4. Draw 10x10 Spatial Coordinate Grid
+        grid_overlay = annotated.copy()
+        grid_color = (255, 200, 0)  # Cyan line
+        for i in range(1, 10):
+            gx = int(w * i / 10)
+            cv2.line(grid_overlay, (gx, 0), (gx, h), grid_color, 1)
+            gy = int(h * i / 10)
+            cv2.line(grid_overlay, (0, gy), (w, gy), grid_color, 1)
+            cv2.putText(grid_overlay, f"C{i}", (gx + 4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(grid_overlay, f"R{i}", (6, gy - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+
+        cv2.addWeighted(grid_overlay, 0.20, annotated, 0.80, 0, annotated)
+
+        # 5. Draw Set-of-Marks Cyan Tags (#1, #2, ...)
+        tag_color = (255, 255, 0)   # Bright Cyan (BGR)
+        badge_bg = (15, 23, 42)     # Dark Slate
+
+        for idx, (bx, by, bw, bh, blabel) in enumerate(selected_boxes, start=1):
+            tag = f"#{idx}"
+            center_x = bx + bw // 2
+            center_y = by + bh // 2
+
+            entry = {
+                "tag": tag,
+                "center": (int(center_x), int(center_y)),
+                "rect": (int(bx), int(by), int(bw), int(bh)),
+                "bbox": (int(bx), int(by), int(bw), int(bh)),
+                "type": "UI_ELEMENT",
+                "label": blabel,
+            }
+            som_dict[tag] = entry
+            som_dict[str(idx)] = entry
+            if blabel:
+                som_dict[blabel.lower()] = entry
+
+            cv2.rectangle(annotated, (bx, by), (bx + bw, by + bh), tag_color, 1)
+
+            tag_text = tag if not blabel else f"{tag}:{blabel[:8]}"
+            font_scale = 0.42
+            thickness = 1
+            (tw, th), _ = cv2.getTextSize(tag_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+
+            badge_y1 = max(0, by - th - 5)
+            badge_y2 = max(th + 5, by)
+            badge_x2 = min(w, bx + tw + 6)
+            cv2.rectangle(annotated, (bx, badge_y1), (badge_x2, badge_y2), badge_bg, -1)
+            cv2.rectangle(annotated, (bx, badge_y1), (badge_x2, badge_y2), tag_color, 1)
+            cv2.putText(
+                annotated,
+                tag_text,
+                (bx + 3, badge_y2 - 3),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                tag_color,
+                thickness,
+                cv2.LINE_AA,
+            )
+
+        VisionManager._som_cache = som_dict
+        self._som_cache = som_dict
+
+        # Encode to JPEG buffer at quality 88
+        _, enc = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        return enc.tobytes(), som_dict

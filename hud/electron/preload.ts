@@ -28,6 +28,9 @@ const electronBridge = {
       ipcRenderer.removeListener("set-layout-mode", handler);
     };
   },
+  shutdownApp: () => {
+    ipcRenderer.send("shutdown-app");
+  },
 };
 
 // Expose both alfredElectron and electronAPI for seamless compatibility

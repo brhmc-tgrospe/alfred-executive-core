@@ -132,10 +132,10 @@ class AlfredHubCoordinator:
             self.logistics.launch_application_or_url,
             self.logistics.inspect_active_screen,
             self.logistics.manage_executive_briefing,
-            self.logistics.remember_fact,
-            self.logistics.recall_context,
+            self.logistics.manage_semantic_memory,
             self.logistics.execute_terminal_command,
             self.logistics.deep_os_file_executive,
+            self.logistics.terminate_executive_commands,
             self.dev_logistics.inspect_git_workspace,
             self.dev_logistics.inspect_local_dev_ports,
             self.dev_logistics.probe_network_target,
@@ -143,6 +143,7 @@ class AlfredHubCoordinator:
             self.dev_logistics.audit_source_file,
             self.dev_logistics.inspect_sqlite_database,
             self.dev_logistics.multi_target_network_sweep,
+            self.dev_logistics.research_software_interface_and_docs,
             self.memory.inspect_learned_habits_and_growth,
             self.gui_logistics.type_into_application,
             self.gui_logistics.write_live_word_document,
@@ -175,6 +176,10 @@ class AlfredHubCoordinator:
             on_transcript=self.on_transcript_update,
             on_thinking_timeout=self._execute_fallback_prompt,
         )
+
+        # Connect graceful shutdown hooks
+        self.logistics.set_shutdown_callback(self.schedule_shutdown)
+        self.live_core.set_shutdown_callback(self.schedule_shutdown)
 
         # Direct aliases for clear architectural access
         self.audio_manager = self.audio
@@ -260,6 +265,56 @@ class AlfredHubCoordinator:
             async with self._lock:
                 self.connected_clients.difference_update(disconnected)
 
+    def schedule_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> None:
+        """Schedules non-blocking graceful executive shutdown sequence."""
+        asyncio.create_task(self.execute_system_shutdown(farewell_message))
+
+    async def execute_system_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> None:
+        """Broadcasts system_shutdown to Electron HUD and exits Python process cleanly after audio playback drains."""
+        logger.warning("[COORDINATOR] System shutdown sequence engaged: %s", farewell_message)
+        if farewell_message:
+            self.on_transcript_update(farewell_message)
+            self.live_core.set_status("speaking")
+            await self.broadcast_state_packet()
+
+        # Wait for audio playback buffer to drain completely
+        try:
+            await self.audio.wait_for_playback_drain(timeout=6.0)
+        except Exception as e:
+            logger.warning("[COORDINATOR] Audio playback drain error during shutdown: %s", e)
+
+        # Broadcast shutdown event to WebSocket clients (Electron HUD)
+        await self.broadcast_shutdown(reason="Director Qadir termination command")
+        await asyncio.sleep(0.5)
+
+        # Stop audio hardware streams
+        try:
+            self.audio.stop()
+        except Exception:
+            pass
+
+        self.is_running = False
+        asyncio.create_task(self._delayed_exit())
+
+    async def _delayed_exit(self) -> None:
+        """Small pause to let network packets flush before process exit."""
+        await asyncio.sleep(0.3)
+        os._exit(0)
+
+    async def broadcast_shutdown(self, reason: str = "Director Qadir termination command") -> None:
+        """Broadcasts system_shutdown message to all connected WebSocket clients (Electron HUD)."""
+        payload = {
+            "type": "system_shutdown",
+            "reason": reason,
+            "timestamp": get_utc8_now_str(),
+        }
+        message = json.dumps(payload)
+        for client in list(self.connected_clients):
+            try:
+                await client.send_text(message)
+            except Exception:
+                pass
+
     async def _metrics_polling_loop(self) -> None:
         """Polls psutil metrics and measures 8.8.8.8 TCP ping every 2.0 seconds."""
         while self.is_running:
@@ -334,7 +389,14 @@ class AlfredHubCoordinator:
         await asyncio.sleep(0.3)
 
         lower = text.lower()
-        if "status" in lower or "report" in lower:
+        if "terminate executive commands alfred" in lower:
+            farewell = "Terminating all executive commands now, Director Qadir. Standing down, Sir."
+            self.live_core.set_status("speaking")
+            self.current_transcript = farewell
+            await self.broadcast_state_packet()
+            self.schedule_shutdown(farewell)
+            return
+        elif "status" in lower or "report" in lower:
             response = f"Systems nominal, Sir. CPU load is at {self.cached_cpu}%, memory consumption at {self.cached_ram}%. Executive logistics core is fully operational."
         elif "diagnostic" in lower or "telemetry" in lower or "system" in lower:
             response = f"Diagnostics complete. CPU: {self.cached_cpu}%, RAM: {self.cached_ram}%. All secondary buffers operational."
@@ -420,6 +482,15 @@ class AlfredHubCoordinator:
         elif msg_type == "text_prompt":
             text = message_data.get("text", "").strip()
             if not text:
+                return
+
+            if "terminate executive commands alfred" in text.lower():
+                logger.warning("Directive 'terminate executive commands alfred' received via text_prompt!")
+                farewell = "Terminating all executive commands now, Director Qadir. Standing down, Sir."
+                self.current_transcript = farewell
+                self.live_core.set_status("speaking")
+                await self.broadcast_state_packet()
+                self.schedule_shutdown(farewell)
                 return
 
             if self.live_core._session and self.live_core.is_running:

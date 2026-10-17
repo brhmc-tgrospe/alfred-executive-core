@@ -151,6 +151,14 @@ ipcMain.on("set-content-protection", (_event, enable: boolean) => {
   }
 });
 
+// IPC Handler for graceful Executive shutdown
+ipcMain.on("shutdown-app", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.close();
+  }
+  app.quit();
+});
+
 app.whenReady().then(() => {
   createWindow();
   createTray();

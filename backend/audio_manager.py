@@ -178,19 +178,20 @@ class AudioManager:
         with self._playback_lock:
             return len(self._playback_buffer) > 0 or self.is_playing
 
-    async def wait_for_playback_drain(self, timeout: float = 6.0) -> None:
-        """Waits asynchronously until the playback bytearray buffer drains completely to 0 bytes."""
+    async def wait_for_playback_drain(self, timeout: float = 6.0) -> bool:
+        """Waits asynchronously until the playback bytearray buffer drains completely to 0 bytes and completes speaker output."""
         start_time = asyncio.get_event_loop().time()
         # Give initial buffer a moment to begin playback
-        await asyncio.sleep(0.04)
-        while self.is_playback_active():
+        await asyncio.sleep(0.05)
+        while self.is_playback_active() or (time.time() - self._last_playback_time < 0.45):
             if (asyncio.get_event_loop().time() - start_time) > timeout:
                 logger.warning("[AudioManager] Playback drain timed out after %.1fs. Forcibly clearing playback.", timeout)
                 self.clear_playback()
-                break
-            await asyncio.sleep(0.03)
+                return False
+            await asyncio.sleep(0.05)
         # Small latency settling window
-        await asyncio.sleep(0.04)
+        await asyncio.sleep(0.05)
+        return True
 
     def clear_playback(self) -> int:
         """Immediately flushes the speaker playback buffer and queue for barge-in interruption."""

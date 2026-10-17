@@ -33,6 +33,14 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          if (data && data.type === "system_shutdown") {
+            console.warn("[ALFRED WS] System shutdown command received:", data.reason);
+            const electron = (window as any).alfredElectron || (window as any).electronAPI;
+            if (electron?.shutdownApp) {
+              electron.shutdownApp();
+            }
+            return;
+          }
           if (data && data.type === "state") {
             const packet = data as AlfredStatePacket;
             const last = lastStateRef.current;

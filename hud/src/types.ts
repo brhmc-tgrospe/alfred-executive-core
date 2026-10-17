@@ -38,6 +38,7 @@ export interface ElectronAPI {
   onPttTriggered?: (callback: () => void) => () => void;
   onToggleLayoutMode?: (callback: () => void) => () => void;
   onSetLayoutMode?: (callback: (mode: LayoutMode) => void) => () => void;
+  shutdownApp?: () => void;
 }
 
 declare global {

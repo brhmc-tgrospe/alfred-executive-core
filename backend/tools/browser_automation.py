@@ -77,6 +77,21 @@ class BrowserAutomationLogistics:
                 pages = self._context.pages
                 self._page = pages[0] if pages else await self._context.new_page()
 
+            # Attach persistent dialog handler to auto-accept native JS dialogs (alert, confirm, prompt)
+            if not getattr(self._page, "_dialog_handler_attached", False):
+                async def _on_dialog(dialog):
+                    logger.info("[Browser Automation] Native JS Dialog (%s): '%s'. Auto-accepting...", dialog.type, dialog.message)
+                    try:
+                        await dialog.accept()
+                    except Exception as ex:
+                        logger.warning("Error auto-accepting dialog: %s", ex)
+
+                try:
+                    self._page.on("dialog", _on_dialog)
+                    self._page._dialog_handler_attached = True
+                except Exception:
+                    pass
+
             return self._page
 
     async def browser_navigate_and_parse_dom(
@@ -156,6 +171,31 @@ class BrowserAutomationLogistics:
                 # Extract cleaned body text
                 body_text = soup.get_text(separator="\n", strip=True)
                 lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+
+                # Prioritize active dynamic modals/popups ([role='dialog'], [aria-modal='true'], .modal, .popover, [role='menu'])
+                modal_selectors = ["[role='dialog']", "[aria-modal='true']", ".modal", ".popover", "[role='menu']", ".dropdown-menu"]
+                modal_headers = []
+                modal_buttons = []
+                modal_inputs = []
+
+                for sel in modal_selectors:
+                    for m in soup.select(sel):
+                        m_txt = m.get_text(separator=" ", strip=True)
+                        if m_txt:
+                            modal_headers.append(f"[MODAL / POPUP DIALOG]: {m_txt[:120]}")
+                        for m_btn in m.find_all(["button", "a"]):
+                            txt = m_btn.get_text(strip=True)
+                            if txt and len(txt) < 40:
+                                modal_buttons.append(f"<modal_button: {txt}>")
+                        for m_inp in m.find_all(["input", "textarea", "select"]):
+                            itype = m_inp.get("type", "text")
+                            iname = m_inp.get("name", "") or m_inp.get("id", "")
+                            modal_inputs.append(f"<modal_input type='{itype}' name='{iname}'>")
+
+                inputs_summary = modal_inputs + inputs_summary
+                buttons_summary = modal_buttons + buttons_summary
+                if modal_headers:
+                    lines = modal_headers + lines
             else:
                 inputs_summary = []
                 buttons_summary = []
@@ -263,7 +303,19 @@ class BrowserAutomationLogistics:
             element = locator.first
 
             if act == "click":
-                await element.click(timeout=6000)
+                try:
+                    await element.click(timeout=4000)
+                except Exception as click_err:
+                    logger.info("[Browser] Standard click intercepted (%s). Attempting dispatch_event('click')...", click_err)
+                    try:
+                        await element.dispatch_event("click", timeout=3000)
+                    except Exception as dispatch_err:
+                        logger.info("[Browser] dispatch_event failed (%s). Attempting JS element.click()...", dispatch_err)
+                        el_h = await element.element_handle()
+                        if el_h:
+                            await page.evaluate("(el) => el.click()", el_h)
+                        else:
+                            raise click_err
             elif act in ("type", "fill"):
                 await element.fill(input_text, timeout=6000)
             elif act == "hover":

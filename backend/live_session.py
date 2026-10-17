@@ -107,6 +107,7 @@ class AlfredLiveCore:
             self.dev_logistics.audit_source_file,
             self.dev_logistics.inspect_sqlite_database,
             self.dev_logistics.multi_target_network_sweep,
+            self.dev_logistics.research_software_interface_and_docs,
         ]
         gui_tools = [
             self.gui_logistics.type_into_application,
@@ -159,6 +160,11 @@ class AlfredLiveCore:
         self._speaking_watchdog_task: Optional[asyncio.Task] = None
         self._drain_task: Optional[asyncio.Task] = None
 
+        # Graceful Executive Shutdown state
+        self._shutdown_callback: Optional[Callable[[str], Any]] = None
+        self._shutdown_pending: bool = False
+        self._shutdown_farewell: str = ""
+
         # Game Overwatch Daemon state
         self._overwatch_task: Optional[asyncio.Task] = None
         self._overwatch_active: bool = False
@@ -169,6 +175,10 @@ class AlfredLiveCore:
 
         if hasattr(self.game_logistics, "set_overwatch_handler"):
             self.game_logistics.set_overwatch_handler(self.handle_overwatch_request)
+
+    def set_shutdown_callback(self, cb: Callable[[str], Any]) -> None:
+        """Configures callback invoked upon graceful executive shutdown."""
+        self._shutdown_callback = cb
 
     def update_transcript(self, text: str) -> None:
         """Notifies coordinator and connected HUD clients with status or transcript update with strict UTC+8 timestamp prefix."""
@@ -396,6 +406,22 @@ class AlfredLiveCore:
             raise RuntimeError("No active Live session.")
 
         logger.info("[ALFRED CORE] Injecting text prompt into active Live session: '%s'", text)
+        if "terminate executive commands alfred" in text.lower():
+            logger.warning("[ALFRED CORE] Termination directive detected in text prompt: '%s'", text)
+            self._shutdown_pending = True
+            self._shutdown_farewell = "Terminating all executive commands now, Director Qadir. Standing down, Sir."
+            self.set_status("speaking")
+            self.update_transcript(self._shutdown_farewell)
+            asyncio.create_task(self._ensure_shutdown_drain_completed(timeout=6.0))
+            try:
+                await self._session.send(
+                    input="[SYSTEM DIRECTIVE: The Director has issued the executive termination phrase 'Terminate Executive Commands Alfred'. Acknowledge immediately and bid farewell to Director Qadir, then invoke terminate_executive_commands.]",
+                    end_of_turn=True,
+                )
+            except Exception:
+                pass
+            return
+
         if hasattr(self, "memory") and self.memory is not None:
             try:
                 self.memory.observe_and_learn_interaction(directive=text, tool_used="")
@@ -405,6 +431,24 @@ class AlfredLiveCore:
         self.set_status("thinking")
         self._arm_thinking_watchdog(fallback_text=text)
         await self._session.send(input=text, end_of_turn=True)
+
+    async def _ensure_shutdown_drain_completed(self, timeout: float = 6.0) -> None:
+        """Awaits audio playback drain and triggers shutdown callback."""
+        try:
+            await asyncio.sleep(0.5)
+            await self.audio_manager.wait_for_playback_drain(timeout=timeout)
+        except Exception as e:
+            logger.warning("[LiveCore] Shutdown drain wait warning: %s", e)
+        finally:
+            if self._shutdown_pending:
+                self._shutdown_pending = False
+                if self._shutdown_callback is not None:
+                    try:
+                        res = self._shutdown_callback(self._shutdown_farewell)
+                        if inspect.isawaitable(res):
+                            await res
+                    except Exception as e:
+                        logger.error("[LiveCore] Shutdown callback execution error: %s", e)
 
     async def dispatch_tool_call(self, session: Any, fc: Any) -> Any:
         """Dispatches Gemini function calls non-blockingly.
@@ -419,6 +463,10 @@ class AlfredLiveCore:
         args = getattr(fc, "args", {}) or {}
 
         logger.info("[ALFRED LOGISTICS] Dispatching protocol: %s (id: %s)", tool_name, call_id)
+        if tool_name == "terminate_executive_commands":
+            self._shutdown_pending = True
+            self._shutdown_farewell = args.get("farewell_message", "Terminating all executive commands now, Director Qadir. Standing down, Sir.")
+            asyncio.create_task(self._ensure_shutdown_drain_completed(timeout=6.0))
         if hasattr(self, "memory") and self.memory is not None:
             try:
                 self.memory.observe_and_learn_interaction(directive="", tool_used=tool_name)
@@ -617,6 +665,18 @@ class AlfredLiveCore:
             await self.audio_manager.wait_for_playback_drain()
             while self.audio_manager.is_speaker_locked():
                 await asyncio.sleep(0.05)
+
+            if self._shutdown_pending:
+                logger.info("[A.L.F.R.E.D.] Speech playback drained. Engaging executive shutdown...")
+                self._shutdown_pending = False
+                if self._shutdown_callback is not None:
+                    try:
+                        res = self._shutdown_callback(self._shutdown_farewell)
+                        if inspect.isawaitable(res):
+                            await res
+                    except Exception as e:
+                        logger.error("[A.L.F.R.E.D.] Shutdown callback execution error: %s", e)
+                return
 
             # Only transition to listening if model turn is closed
             if not self._model_turn_open and self.status in ("speaking", "thinking"):
