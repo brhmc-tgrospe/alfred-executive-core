@@ -52,6 +52,29 @@ DESTRUCTIVE_HOTKEYS = {
     "ctrl+shift+esc",
 }
 
+import ctypes
+import sys
+
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+def get_live_cursor_coords() -> tuple[int, int]:
+    """Retrieves current hardware OS cursor coordinates with pyautogui fallback."""
+    if hasattr(ctypes, "windll") and sys.platform.startswith("win"):
+        try:
+            pt = POINT()
+            if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+                return int(pt.x), int(pt.y)
+        except Exception:
+            pass
+    if pyautogui is not None:
+        try:
+            pos = pyautogui.position()
+            return int(pos.x), int(pos.y)
+        except Exception:
+            pass
+    return 0, 0
+
 
 class GuiAutomationLogistics:
     """Desktop GUI automation and visual co-editing suite."""
@@ -343,8 +366,8 @@ class GuiAutomationLogistics:
         """Performs precise desktop mouse actions at specific (x, y) screen pixel coordinates.
 
         Args:
-            x: Horizontal pixel coordinate on the desktop screen.
-            y: Vertical pixel coordinate on the desktop screen.
+            x: Horizontal pixel coordinate on the desktop screen. Pass -1 to target current cursor position.
+            y: Vertical pixel coordinate on the desktop screen. Pass -1 to target current cursor position.
             action: Action to perform: 'click', 'double_click', 'right_click', 'move', 'scroll'.
             scroll_amount: Number of scroll ticks for 'scroll' action (positive scrolls up, negative down).
 
@@ -353,6 +376,10 @@ class GuiAutomationLogistics:
         """
         if pyautogui is None:
             return "Error: pyautogui is unavailable on this host."
+
+        # Support live cursor auto-targeting when coordinates are (-1, -1) or user says 'click where my mouse is'
+        if x == -1 and y == -1:
+            x, y = get_live_cursor_coords()
 
         act = action.strip().lower()
         try:

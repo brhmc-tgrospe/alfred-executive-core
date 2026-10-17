@@ -1,14 +1,17 @@
 """A.L.F.R.E.D. Vision Manager.
 
-Captures monitor screenshots using mss and Pillow, downsamples to 1024px JPEG bytes
-for high-efficiency streaming to the Gemini Multimodal Live API.
+Captures monitor screenshots using mss and Pillow, supports 1920x1080 full-screen capture
+at high quality (88), and provides high-resolution 2.0x zoomed cursor magnifier crops
+at quality 95 with cyan targeting reticles for razor-sharp tooltip and UI inspection.
 Includes resilient fallback for headless/non-interactive Windows desktop sessions.
 """
 
 from __future__ import annotations
 
+import ctypes
 import io
 import logging
+import sys
 from typing import Optional, Tuple
 from PIL import Image, ImageDraw
 
@@ -21,10 +24,31 @@ except ImportError:
     mss = None
 
 
-class VisionManager:
-    """Manages high-speed display capture and JPEG compression."""
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
-    def __init__(self, target_width: int = 1024, jpeg_quality: int = 70) -> None:
+
+def _get_os_cursor_pos() -> Optional[Tuple[int, int]]:
+    """Retrieves physical OS cursor coordinates with pyautogui fallback."""
+    if hasattr(ctypes, "windll") and sys.platform.startswith("win"):
+        try:
+            pt = POINT()
+            if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+                return int(pt.x), int(pt.y)
+        except Exception:
+            pass
+    try:
+        import pyautogui
+        pos = pyautogui.position()
+        return int(pos.x), int(pos.y)
+    except Exception:
+        return None
+
+
+class VisionManager:
+    """Manages high-speed display capture, 1920x1080 full frames, and 2.0x cursor magnifier crops."""
+
+    def __init__(self, target_width: int = 1920, jpeg_quality: int = 88) -> None:
         self.target_width = target_width
         self.jpeg_quality = jpeg_quality
         self._last_frame: Optional[bytes] = None
@@ -40,21 +64,13 @@ class VisionManager:
         draw.text((40, 40), f"[ALFRED TELEMETRY] {message}", fill=(245, 158, 11))
         return img
 
-    def capture_screen_jpeg(self, monitor_index: int = 1) -> bytes:
-        """Captures the designated monitor, scales it proportionally, and returns JPEG bytes.
-
-        Args:
-            monitor_index: Monitor index (1 = primary monitor in mss).
-
-        Returns:
-            bytes: Compressed JPEG image data.
-        """
+    def _grab_raw_image(self, monitor_index: int = 1) -> Image.Image:
+        """Captures raw native desktop image from the designated monitor without downscaling."""
         img: Optional[Image.Image] = None
 
         # 1. Attempt capture via mss
         if mss is not None:
             try:
-                # Use mss.MSS() or mss.mss()
                 factory = getattr(mss, "MSS", getattr(mss, "mss", None))
                 with factory() as sct:
                     monitors = sct.monitors
@@ -80,13 +96,24 @@ class VisionManager:
                 logger.debug("PIL ImageGrab fallback failed: %s", e)
                 img = None
 
-        # 3. If Windows GDI is not accessible (headless/Session 0), use cached frame or diagnostic frame
+        # 3. If Windows GDI is not accessible, return fallback image
         if img is None:
-            if self._last_frame is not None:
-                return self._last_frame
             img = self._generate_fallback_image()
 
-        # Downsample proportionally if width exceeds target_width
+        return img
+
+    def capture_screen_jpeg(self, monitor_index: int = 1) -> bytes:
+        """Captures designated monitor, scales to target_width (1920px default), and returns JPEG bytes.
+
+        Args:
+            monitor_index: Monitor index (1 = primary monitor in mss).
+
+        Returns:
+            bytes: Compressed JPEG image data.
+        """
+        img = self._grab_raw_image(monitor_index=monitor_index)
+
+        # Downsample proportionally only if width exceeds target_width
         if img.width > self.target_width:
             aspect_ratio = img.height / img.width
             target_height = int(self.target_width * aspect_ratio)
@@ -98,6 +125,91 @@ class VisionManager:
         jpeg_bytes = buffer.getvalue()
         self._last_frame = jpeg_bytes
         return jpeg_bytes
+
+    def capture_cursor_magnifier_jpeg(
+        self,
+        crop_width: int = 520,
+        crop_height: int = 340,
+        zoom: float = 2.0,
+        monitor_index: int = 1,
+    ) -> bytes:
+        """Crops a region centered around the live OS cursor, draws a cyan reticle, and upscales 2.0x.
+
+        Provides razor-sharp visibility of tiny hover tooltips, game item stats, small text,
+        and subtle UI indicators that would otherwise blur in full-screen captures.
+
+        Args:
+            crop_width: Width of native-resolution crop box (default 520px).
+            crop_height: Height of native-resolution crop box (default 340px).
+            zoom: Upscale magnification factor (default 2.0x).
+            monitor_index: Monitor index to capture from.
+
+        Returns:
+            bytes: Compressed high-quality JPEG data (quality=95) of the magnified cursor area.
+        """
+        raw_img = self._grab_raw_image(monitor_index=monitor_index)
+        img_w, img_h = raw_img.width, raw_img.height
+
+        # Query live hardware OS cursor coordinates
+        cursor_pos = _get_os_cursor_pos()
+        if cursor_pos is not None:
+            mx, my = cursor_pos
+        else:
+            mx, my = img_w // 2, img_h // 2
+
+        # Clamp center coordinate within valid desktop bounds
+        clamped_mx = max(0, min(img_w - 1, mx))
+        clamped_my = max(0, min(img_h - 1, my))
+
+        crop_w = min(crop_width, img_w)
+        crop_h = min(crop_height, img_h)
+
+        # Calculate bounding box centered at (clamped_mx, clamped_my)
+        left = clamped_mx - (crop_w // 2)
+        top = clamped_my - (crop_h // 2)
+
+        # Screen boundary clamping
+        if left < 0:
+            left = 0
+        elif left + crop_w > img_w:
+            left = max(0, img_w - crop_w)
+
+        if top < 0:
+            top = 0
+        elif top + crop_h > img_h:
+            top = max(0, img_h - crop_h)
+
+        right = left + crop_w
+        bottom = top + crop_h
+
+        crop_img = raw_img.crop((left, top, right, bottom)).copy()
+
+        # Relative cursor coordinates within the cropped image
+        rel_x = max(0, min(crop_w - 1, clamped_mx - left))
+        rel_y = max(0, min(crop_h - 1, clamped_my - top))
+
+        # Draw subtle cyan targeting reticle at exact cursor position
+        draw = ImageDraw.Draw(crop_img)
+        reticle_color = (6, 182, 212)  # Cyan #06b6d4
+
+        # Crosshair lines with center clearance
+        draw.line([(rel_x - 14, rel_y), (rel_x - 4, rel_y)], fill=reticle_color, width=2)
+        draw.line([(rel_x + 4, rel_y), (rel_x + 14, rel_y)], fill=reticle_color, width=2)
+        draw.line([(rel_x, rel_y - 14), (rel_x, rel_y - 4)], fill=reticle_color, width=2)
+        draw.line([(rel_x, rel_y + 4), (rel_x, rel_y + 14)], fill=reticle_color, width=2)
+
+        # Subtle center reticle ring
+        draw.ellipse([(rel_x - 3, rel_y - 3), (rel_x + 3, rel_y + 3)], outline=reticle_color, width=1)
+
+        # Upscale 2.0x using Lanczos resampling for pristine pixel clarity
+        target_w = int(crop_w * zoom)
+        target_h = int(crop_h * zoom)
+        zoomed_img = crop_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+        # Compress into high-res JPEG buffer at quality 95
+        buffer = io.BytesIO()
+        zoomed_img.save(buffer, format="JPEG", quality=95, optimize=True)
+        return buffer.getvalue()
 
     def get_image_dimensions(self, jpeg_bytes: bytes) -> Tuple[int, int]:
         """Utility helper to parse image dimensions from JPEG bytes without full decode."""

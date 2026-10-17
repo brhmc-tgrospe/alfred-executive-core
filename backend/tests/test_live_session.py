@@ -98,15 +98,20 @@ async def test_visual_cortex_screen_injection(core_setup):
     )
 
     result = await core.dispatch_tool_call(mock_session, fc)
-    assert "Screen frame captured" in result
+    assert "Full screen" in result
+    assert "2.0x cursor magnifier" in result
 
-    # Verify that mock_session.send was called twice:
-    # 1st call: Image JPEG frame sent to Live API
-    # 2nd call: Tool Response sent
-    assert mock_session.send.await_count == 2
+    # Verify that mock_session.send was called 3 times:
+    # 1st call: Full screen JPEG frame sent to Live API
+    # 2nd call: 2.0x Cursor Magnifier JPEG frame sent to Live API
+    # 3rd call: Tool Response sent
+    assert mock_session.send.await_count == 3
     first_call_kwargs = mock_session.send.call_args_list[0].kwargs
     assert first_call_kwargs["input"]["mime_type"] == "image/jpeg"
     assert len(first_call_kwargs["input"]["data"]) > 0
+    second_call_kwargs = mock_session.send.call_args_list[1].kwargs
+    assert second_call_kwargs["input"]["mime_type"] == "image/jpeg"
+    assert len(second_call_kwargs["input"]["data"]) > 0
 
 
 @pytest.mark.asyncio

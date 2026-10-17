@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 from typing import Any, Callable, Dict, List, Optional
@@ -158,6 +159,17 @@ class AlfredLiveCore:
         self._speaking_watchdog_task: Optional[asyncio.Task] = None
         self._drain_task: Optional[asyncio.Task] = None
 
+        # Game Overwatch Daemon state
+        self._overwatch_task: Optional[asyncio.Task] = None
+        self._overwatch_active: bool = False
+        self._overwatch_window: str = "active"
+        self._overwatch_auto_assist: str = ""
+        self._last_overwatch_state: str = "INITIAL"
+        self._last_hp_warning_time: float = 0.0
+
+        if hasattr(self.game_logistics, "set_overwatch_handler"):
+            self.game_logistics.set_overwatch_handler(self.handle_overwatch_request)
+
     def update_transcript(self, text: str) -> None:
         """Notifies coordinator and connected HUD clients with status or transcript update with strict UTC+8 timestamp prefix."""
         if self.on_transcript:
@@ -257,6 +269,127 @@ class AlfredLiveCore:
         self.audio_manager.clear_playback()
         self.set_status("listening")
 
+    def handle_overwatch_request(self, window_title: str, enable: bool, auto_assist_keys: str) -> None:
+        """Callback invoked when observe_game_state requests continuous overwatch background polling."""
+        if not enable:
+            self.stop_game_overwatch()
+        else:
+            self.start_game_overwatch(window_title=window_title, auto_assist_keys=auto_assist_keys)
+
+    def start_game_overwatch(self, window_title: str = "active", auto_assist_keys: str = "") -> None:
+        """Spawns continuous background game overwatch async loop polling every 1.0 second."""
+        self.stop_game_overwatch()
+        self._overwatch_active = True
+        self._overwatch_window = window_title
+        self._overwatch_auto_assist = auto_assist_keys
+        self._last_overwatch_state = "INITIAL"
+        self._last_hp_warning_time = 0.0
+        self._overwatch_task = asyncio.create_task(self._overwatch_worker())
+        logger.info("[Game Overwatch] Daemon initiated for window '%s' (auto_assist='%s')", window_title, auto_assist_keys)
+
+    def stop_game_overwatch(self) -> None:
+        """Stops the continuous background game overwatch task."""
+        self._overwatch_active = False
+        if self._overwatch_task and not self._overwatch_task.done():
+            self._overwatch_task.cancel()
+        self._overwatch_task = None
+        logger.info("[Game Overwatch] Daemon halted.")
+
+    async def _overwatch_worker(self) -> None:
+        """Continuous background task polling game state every 1.0s and delivering real-time vocal callouts."""
+        try:
+            while self._overwatch_active:
+                try:
+                    obs_str = await asyncio.to_thread(
+                        self.game_logistics.observe_game_state,
+                        window_title=self._overwatch_window,
+                        detect_hud_bars=True,
+                        continuous_watch=False,
+                    )
+                    obs = json.loads(obs_str)
+                    state = obs.get("game_state", "ACTIVE_GAMEPLAY")
+                    hud = obs.get("hud_meters", {})
+                    hp = hud.get("health_percent", 100.0)
+                    archetype = obs.get("hud_archetype", "top_left_bars")
+                    now = time.time()
+
+                    # 1. Game Loaded Confirmation: LOADING_OR_MENU -> ACTIVE_GAMEPLAY
+                    if self._last_overwatch_state == "LOADING_OR_MENU" and state == "ACTIVE_GAMEPLAY":
+                        load_msg = (
+                            f"Game session confirmed and telemetry locked in, Sir. "
+                            f"HUD calibrated to [{archetype}]. Vitality at {hp}%. Overwatch standing by."
+                        )
+                        logger.info("[Game Overwatch] %s", load_msg)
+                        self.update_transcript(load_msg)
+                        if self._session and self.is_running and self.status in ("listening", "idle"):
+                            try:
+                                await self._session.send(input=f"[SYSTEM NOTIFICATION: {load_msg}]", end_of_turn=True)
+                            except Exception:
+                                pass
+
+                    # 2. Critical HP Warning & Co-Pilot Assist
+                    if state == "ACTIVE_GAMEPLAY" and hp < 35.0:
+                        if (now - self._last_hp_warning_time) > 6.0:
+                            self._last_hp_warning_time = now
+                            warn_msg = f"Warning, Director: Critical vitality at {hp}%!"
+                            logger.warning("[Game Overwatch] %s", warn_msg)
+                            self.update_transcript(warn_msg)
+
+                            if self._overwatch_auto_assist:
+                                try:
+                                    assist_res = await asyncio.to_thread(
+                                        self.game_logistics.send_game_input_action,
+                                        self._overwatch_auto_assist,
+                                    )
+                                    logger.info("[Game Overwatch] Auto assist triggered (%s): %s", self._overwatch_auto_assist, assist_res)
+                                except Exception as e:
+                                    logger.error("Auto assist failed: %s", e)
+
+                            if self._session and self.is_running and self.status in ("listening", "idle"):
+                                try:
+                                    assist_note = f" Triggered emergency auto-assist [{self._overwatch_auto_assist}]." if self._overwatch_auto_assist else ""
+                                    await self._session.send(
+                                        input=f"[TACTICAL ALERT: Vitality critical at {hp}%.{assist_note} Advise tactical retreat or heal.]",
+                                        end_of_turn=True,
+                                    )
+                                except Exception:
+                                    pass
+
+                    # 3. Player Death / Tactical Post-Mortem
+                    if state == "PLAYER_DEAD" and self._last_overwatch_state != "PLAYER_DEAD":
+                        death_msg = "Director, vital signs flatlined. Threat overpowered defenses."
+                        logger.warning("[Game Overwatch] %s", death_msg)
+                        self.update_transcript(death_msg)
+
+                        targets = obs.get("nearest_targets", [])
+                        threat_details = f"{len(targets)} hostile target(s) present." if targets else "Overwhelming burst damage."
+                        if self._session and self.is_running and self.status in ("listening", "idle"):
+                            try:
+                                await self._session.send(
+                                    input=f"[TACTICAL POST-MORTEM: Combat defeat confirmed. Vector analysis: {threat_details} Adjusting tactical engagement parameters for next run.]",
+                                    end_of_turn=True,
+                                )
+                            except Exception:
+                                pass
+
+                    # 4. Periodic visual frame injection for strategic awareness (every 10s during gameplay)
+                    if state == "ACTIVE_GAMEPLAY" and (int(now) % 10 == 0) and self._session and self.status in ("listening", "idle"):
+                        try:
+                            frame_jpeg = self.vision_manager.capture_screen_jpeg()
+                            await self._session.send(
+                                input={"data": frame_jpeg, "mime_type": "image/jpeg"},
+                                end_of_turn=False,
+                            )
+                        except Exception:
+                            pass
+
+                    self._last_overwatch_state = state
+                except Exception as e:
+                    logger.debug("[Game Overwatch] Worker poll error: %s", e)
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            pass
+
     async def send_text_prompt(self, text: str) -> None:
         """Sends a text directive turn to the active Gemini Live session with watchdog protection."""
         if not self._session or not self.is_running:
@@ -303,9 +436,14 @@ class AlfredLiveCore:
             if tool_name == "inspect_active_screen" and session is not None:
                 try:
                     jpeg_bytes = self.vision_manager.capture_screen_jpeg()
-                    logger.info("[Visual Cortex] Streaming 1024px screen frame into active Live session...")
+                    mag_bytes = self.vision_manager.capture_cursor_magnifier_jpeg()
+                    logger.info("[Visual Cortex] Streaming 1920px screen frame and 2.0x cursor magnifier into active Live session...")
                     await session.send(
                         input={"data": jpeg_bytes, "mime_type": "image/jpeg"},
+                        end_of_turn=False,
+                    )
+                    await session.send(
+                        input={"data": mag_bytes, "mime_type": "image/jpeg"},
                         end_of_turn=False,
                     )
                 except Exception as e:
@@ -704,6 +842,7 @@ class AlfredLiveCore:
     async def stop(self) -> None:
         """Gracefully disconnects the session and halts audio streams."""
         self._loop_active = False
+        self.stop_game_overwatch()
         self._disarm_thinking_watchdog()
         self._disarm_speaking_watchdog()
         if self._drain_task and not self._drain_task.done():

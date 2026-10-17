@@ -165,8 +165,13 @@ class OSLogistics:
         """
         try:
             jpeg_bytes = self.vision.capture_screen_jpeg()
+            mag_bytes = self.vision.capture_cursor_magnifier_jpeg()
             w, h = self.vision.get_image_dimensions(jpeg_bytes)
-            return f"Screen frame captured ({w}x{h}px, {len(jpeg_bytes)//1024}KB). Visual analysis for: '{question}'."
+            mw, mh = self.vision.get_image_dimensions(mag_bytes)
+            return (
+                f"Full screen ({w}x{h}px) and 2.0x cursor magnifier ({mw}x{mh}px) captured. "
+                f"Visual analysis targeting: '{question}'."
+            )
         except Exception as e:
             return f"Screen inspection failed: {e}"
 

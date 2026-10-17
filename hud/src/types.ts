@@ -23,6 +23,8 @@ export interface AlfredStatePacket {
   cpu: number;
   ram: number;
   ping_ms?: number;
+  mouse_x?: number;
+  mouse_y?: number;
   transcript: string;
   active_tool: string | null;
   pending_approval: PendingApproval | null;

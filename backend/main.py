@@ -15,12 +15,32 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
+import ctypes
 from typing import Optional, Set
 from dotenv import load_dotenv
 import psutil
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 import uvicorn
+
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+def get_cursor_position() -> tuple[int, int]:
+    """Retrieves hardware OS mouse coordinates via Win32 GetCursorPos with pyautogui fallback."""
+    if hasattr(ctypes, "windll") and sys.platform.startswith("win"):
+        try:
+            pt = POINT()
+            if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+                return int(pt.x), int(pt.y)
+        except Exception:
+            pass
+    try:
+        import pyautogui
+        pos = pyautogui.position()
+        return int(pos.x), int(pos.y)
+    except Exception:
+        return 0, 0
 
 from backend.audio_manager import AudioManager
 from backend.vision_manager import VisionManager
@@ -202,6 +222,8 @@ class AlfredHubCoordinator:
         else:
             effective_rms = max(self.audio.current_mic_rms, self.simulated_rms)
 
+        mx, my = get_cursor_position()
+
         return {
             "type": "state",
             "status": self.live_core.status,
@@ -210,6 +232,8 @@ class AlfredHubCoordinator:
             "cpu": self.cached_cpu,
             "ram": self.cached_ram,
             "ping_ms": self.cached_ping,
+            "mouse_x": mx,
+            "mouse_y": my,
             "transcript": self.current_transcript,
             "active_tool": self.live_core.active_tool,
             "pending_approval": self.pending_approval,
@@ -416,10 +440,16 @@ class AlfredHubCoordinator:
             if self.live_core._session and self.live_core.is_running:
                 try:
                     jpeg_bytes = self.vision.capture_screen_jpeg()
+                    mag_bytes = self.vision.capture_cursor_magnifier_jpeg()
                     await self.live_core._session.send(
                         input={"data": jpeg_bytes, "mime_type": "image/jpeg"},
                         end_of_turn=False,
                     )
+                    await self.live_core._session.send(
+                        input={"data": mag_bytes, "mime_type": "image/jpeg"},
+                        end_of_turn=False,
+                    )
+                    logger.info("Injected full screen and 2.0x cursor magnifier frames to Live session.")
                 except Exception as e:
                     logger.warning("Failed to stream screen to Live session: %s", e)
             else:

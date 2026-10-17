@@ -121,6 +121,15 @@ class GameInteractionLogistics:
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="alfred_game_compute")
         self._last_observation: Optional[Dict[str, Any]] = None
         self._is_windows = hasattr(ctypes, "windll") and sys.platform.startswith("win")
+        self._last_game_state: str = "LOADING_OR_MENU"
+        self._previous_gameplay_hp: float = 100.0
+        self._was_in_active_gameplay: bool = False
+        self._calibrated_archetype: str = "top_left_bars"
+        self._overwatch_handler: Optional[Any] = None
+
+    def set_overwatch_handler(self, handler: Any) -> None:
+        """Registers callback hook for starting and stopping background continuous overwatch."""
+        self._overwatch_handler = handler
 
     # ---------------------------------------------------------------------------
     # Low-Level DirectInput Hardware Dispatchers
@@ -249,7 +258,8 @@ class GameInteractionLogistics:
     # ---------------------------------------------------------------------------
     def _capture_window_bgr(self, window_title: str) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Captures window frame in <15ms via MSS and returns BGR NumPy image."""
-        with mss.mss() as sct:
+        mss_cls = getattr(mss, "MSS", getattr(mss, "mss", None))
+        with mss_cls() as sct:
             rect = None
             if window_title != "active" and gw is not None:
                 matches = gw.getWindowsWithTitle(window_title)
@@ -276,19 +286,28 @@ class GameInteractionLogistics:
             meta = {"width": frame_bgr.shape[1], "height": frame_bgr.shape[0], "rect": rect}
             return frame_bgr, meta
 
-    def observe_game_state(self, window_title: str = "active", detect_hud_bars: bool = True) -> str:
+    def observe_game_state(
+        self,
+        window_title: str = "active",
+        detect_hud_bars: bool = True,
+        continuous_watch: bool = False,
+        auto_assist_keys: str = "",
+    ) -> str:
         """Captures real-time game window via OpenCV (cv2) and extracts structured gameplay observation vectors.
 
         Extracts:
-        1. Player Health % (via HSV red color mask in HUD region).
-        2. Player Resource/Mana % (via HSV blue color mask).
-        3. Stamina/Energy % (via HSV green color mask).
+        1. Universal Multi-Zone HUD Auto-Profiler (top_left_bars, bottom_globes, bottom_center_bar, tactical_corners).
+        2. Game state classification ("LOADING_OR_MENU", "ACTIVE_GAMEPLAY", "PLAYER_DEAD").
+        3. Player Health %, Resource/Mana %, Stamina/Energy % calibrated to active archetype.
         4. Target/Enemy Centroids (high-contrast contours relative to crosshair).
         5. Frame capture latency and estimated observation FPS.
+        6. Continuous Background Overwatch Daemon with autonomous emergency co-pilot assistance.
 
         Args:
-            window_title: Title of target game window, or 'active' for currently focused window.
+            window_title: Title of target game window, or 'active'. Pass 'stop' with continuous_watch to halt overwatch.
             detect_hud_bars: Whether to compute color masks for player Health/Mana/Stamina bars.
+            continuous_watch: If True, activates 1.0s background overwatch daemon for continuous vocal callouts.
+            auto_assist_keys: DirectInput keys to auto-fire on critical health (e.g. '1' for flask or 'space' for dodge).
 
         Returns:
             Structured JSON observation space.
@@ -297,55 +316,154 @@ class GameInteractionLogistics:
             start_t = time.perf_counter()
             try:
                 frame, meta = self._capture_window_bgr(window_title)
-            except Exception as e:
+            except Exception:
                 # Fallback to simulated 720p frame for tests or headless environments
                 frame = np.zeros((720, 1280, 3), dtype=np.uint8)
                 meta = {"width": 1280, "height": 720, "rect": {}}
 
             h, w = frame.shape[:2]
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            var_lum = float(np.var(gray))
+            mean_lum = float(np.mean(gray))
+
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-            health_pct = 100.0
-            resource_pct = 100.0
-            stamina_pct = 100.0
+            # Global Color Thresholds in HSV
+            # 1. Health / Vitality (Red HSV ranges: 0-10 and 170-180)
+            r_mask1 = cv2.inRange(hsv, np.array([0, 70, 50]), np.array([10, 255, 255]))
+            r_mask2 = cv2.inRange(hsv, np.array([170, 70, 50]), np.array([180, 255, 255]))
+            red_mask = r_mask1 | r_mask2
 
-            if detect_hud_bars:
-                # HUD zones: inspect top 30% and bottom 25% where HUD meters reside
-                hud_mask_top = np.zeros((h, w), dtype=np.uint8)
-                hud_mask_top[0:int(h * 0.30), :] = 255
-                hud_mask_bottom = np.zeros((h, w), dtype=np.uint8)
-                hud_mask_bottom[int(h * 0.75):h, :] = 255
-                hud_zone = hud_mask_top | hud_mask_bottom
+            # 2. Resource / Mana / Shield (Blue HSV range: 95-135)
+            blue_mask = cv2.inRange(hsv, np.array([95, 70, 50]), np.array([135, 255, 255]))
 
-                # 1. Health Bar (Red HSV ranges: 0-10 and 170-180)
-                r_mask1 = cv2.inRange(hsv, np.array([0, 70, 50]), np.array([10, 255, 255]))
-                r_mask2 = cv2.inRange(hsv, np.array([170, 70, 50]), np.array([180, 255, 255]))
-                red_hud = (r_mask1 | r_mask2) & hud_zone
-                red_count = int(cv2.countNonZero(red_hud))
+            # 3. Stamina / Energy / Vitality (Green HSV range: 35-85)
+            green_mask = cv2.inRange(hsv, np.array([35, 70, 50]), np.array([85, 255, 255]))
 
-                # 2. Resource/Mana Bar (Blue HSV range: 100-130)
-                blue_mask = cv2.inRange(hsv, np.array([100, 70, 50]), np.array([130, 255, 255])) & hud_zone
-                blue_count = int(cv2.countNonZero(blue_mask))
+            # Archetype 1: top_left_bars (Souls-likes, Action RPGs, Fighting)
+            mask_tl = np.zeros((h, w), dtype=np.uint8)
+            mask_tl[0:int(h * 0.30), 0:int(w * 0.45)] = 255
+            tl_red = int(cv2.countNonZero(red_mask & mask_tl))
+            tl_blue = int(cv2.countNonZero(blue_mask & mask_tl))
+            tl_green = int(cv2.countNonZero(green_mask & mask_tl))
+            score_tl = tl_red + tl_blue + tl_green
 
-                # 3. Stamina/Energy Bar (Green HSV range: 35-85)
-                green_mask = cv2.inRange(hsv, np.array([35, 70, 50]), np.array([85, 255, 255])) & hud_zone
-                green_count = int(cv2.countNonZero(green_mask))
+            # Archetype 2: bottom_globes (Isometric ARPGs like Diablo / PoE)
+            mask_bg_l = np.zeros((h, w), dtype=np.uint8)  # Left globe (Health)
+            mask_bg_l[int(h * 0.65):h, 0:int(w * 0.28)] = 255
+            mask_bg_r = np.zeros((h, w), dtype=np.uint8)  # Right globe (Mana)
+            mask_bg_r[int(h * 0.65):h, int(w * 0.72):w] = 255
+            bg_red = int(cv2.countNonZero(red_mask & mask_bg_l))
+            bg_blue = int(cv2.countNonZero(blue_mask & mask_bg_r))
+            bg_green = int(cv2.countNonZero(green_mask & (mask_bg_l | mask_bg_r)))
+            score_bg = bg_red + bg_blue + bg_green
 
-                # Normalize counts against expected reference gauge area (~1500 pixels)
-                ref_gauge = max(100.0, (w * h) * 0.002)
-                health_pct = float(round(min(100.0, max(0.0, (red_count / ref_gauge) * 100.0)), 1))
-                resource_pct = float(round(min(100.0, max(0.0, (blue_count / ref_gauge) * 100.0)), 1))
-                stamina_pct = float(round(min(100.0, max(0.0, (green_count / ref_gauge) * 100.0)), 1))
+            # Archetype 3: bottom_center_bar (MOBAs, MMOs, Hero Shooters)
+            mask_bc = np.zeros((h, w), dtype=np.uint8)
+            mask_bc[int(h * 0.70):h, int(w * 0.22):int(w * 0.78)] = 255
+            bc_red = int(cv2.countNonZero(red_mask & mask_bc))
+            bc_blue = int(cv2.countNonZero(blue_mask & mask_bc))
+            bc_green = int(cv2.countNonZero(green_mask & mask_bc))
+            score_bc = bc_red + bc_blue + bc_green
 
-                # Default fallback if screen is largely neutral
-                if red_count == 0:
+            # Archetype 4: tactical_corners (RTS, Strategy, Simulators)
+            mask_tc = np.zeros((h, w), dtype=np.uint8)
+            mask_tc[int(h * 0.68):h, 0:int(w * 0.32)] = 255
+            mask_tc[int(h * 0.68):h, int(w * 0.68):w] = 255
+            mask_tc[0:int(h * 0.15), int(w * 0.55):w] = 255
+            tc_red = int(cv2.countNonZero(red_mask & mask_tc))
+            tc_blue = int(cv2.countNonZero(blue_mask & mask_tc))
+            tc_green = int(cv2.countNonZero(green_mask & mask_tc))
+            score_tc = tc_red + tc_blue + tc_green
+
+            # Multi-zone auto-calibration
+            archetype_scores = {
+                "top_left_bars": score_tl,
+                "bottom_globes": score_bg,
+                "bottom_center_bar": score_bc,
+                "tactical_corners": score_tc,
+            }
+            detected_arch = max(archetype_scores, key=archetype_scores.get)
+            max_score = archetype_scores[detected_arch]
+            if max_score >= 50:
+                self._calibrated_archetype = detected_arch
+            archetype = self._calibrated_archetype
+
+            # Check letterbox black borders
+            top_strip = gray[:int(h * 0.10), :]
+            bottom_strip = gray[int(h * 0.90):, :]
+            black_borders = bool(np.mean(top_strip) < 12.0 and np.mean(bottom_strip) < 12.0)
+            total_hud_score = score_tl + score_bg + score_bc + score_tc
+
+            # Death / Defeat Detection
+            center_box = frame[int(h * 0.35):int(h * 0.65), int(w * 0.20):int(w * 0.80)]
+            hsv_center = cv2.cvtColor(center_box, cv2.COLOR_BGR2HSV)
+            red_center_box = int(cv2.countNonZero(
+                cv2.inRange(hsv_center, np.array([0, 70, 50]), np.array([10, 255, 255])) |
+                cv2.inRange(hsv_center, np.array([170, 70, 50]), np.array([180, 255, 255]))
+            ))
+            center_death_overlay = (red_center_box > 1200)
+
+            # Universal Loading / Menu Gate
+            is_loading_or_menu = False
+            if not center_death_overlay:
+                if total_hud_score < 40:
+                    if var_lum < 160.0 or mean_lum < 18.0:
+                        is_loading_or_menu = True
+                    elif black_borders or var_lum < 320.0:
+                        is_loading_or_menu = True
+
+            # Selected archetype gauge normalization
+            if archetype == "top_left_bars":
+                r_count, b_count, g_count = tl_red, tl_blue, tl_green
+                ref_gauge = max(80.0, (w * h) * 0.0016)
+            elif archetype == "bottom_globes":
+                r_count, b_count, g_count = bg_red, bg_blue, bg_green
+                ref_gauge = max(100.0, (w * h) * 0.0022)
+            elif archetype == "bottom_center_bar":
+                r_count, b_count, g_count = bc_red, bc_blue, bc_green
+                ref_gauge = max(80.0, (w * h) * 0.0018)
+            else:
+                r_count, b_count, g_count = tc_red, tc_blue, tc_green
+                ref_gauge = max(80.0, (w * h) * 0.0015)
+
+            combat_death = (
+                self._was_in_active_gameplay
+                and self._previous_gameplay_hp > 15.0
+                and r_count < 8
+                and not is_loading_or_menu
+            )
+
+            if center_death_overlay or combat_death:
+                game_state = "PLAYER_DEAD"
+                health_pct = 0.0
+                resource_pct = float(round(min(100.0, max(0.0, (b_count / ref_gauge) * 100.0)), 1))
+                stamina_pct = 0.0
+                tactical_state = "PLAYER_DEFEATED"
+                self._was_in_active_gameplay = False
+            elif is_loading_or_menu:
+                game_state = "LOADING_OR_MENU"
+                health_pct = 100.0
+                resource_pct = 100.0
+                stamina_pct = 100.0
+                tactical_state = "OUT_OF_COMBAT"
+            else:
+                game_state = "ACTIVE_GAMEPLAY"
+                self._was_in_active_gameplay = True
+                health_pct = float(round(min(100.0, max(0.0, (r_count / ref_gauge) * 100.0)), 1))
+                resource_pct = float(round(min(100.0, max(0.0, (b_count / ref_gauge) * 100.0)), 1))
+                stamina_pct = float(round(min(100.0, max(0.0, (g_count / ref_gauge) * 100.0)), 1))
+
+                if r_count == 0 and not self._was_in_active_gameplay:
                     health_pct = 100.0
-                if blue_count == 0:
+                if b_count == 0:
                     resource_pct = 100.0
-                if green_count == 0:
+                if g_count == 0:
                     stamina_pct = 100.0
 
-            # 4. Target / Centroid Detection in central viewport
+                self._previous_gameplay_hp = health_pct
+
+            # Target / Centroid Detection in central viewport
             center_x, center_y = w // 2, h // 2
             v_top, v_bottom = int(h * 0.20), int(h * 0.80)
             v_left, v_right = int(w * 0.20), int(w * 0.80)
@@ -372,7 +490,6 @@ class GameInteractionLogistics:
                             "area_px": int(area),
                         })
 
-            # Sort targets by nearest to crosshair
             targets.sort(key=lambda t: t["distance_to_crosshair"])
             nearest_targets = targets[:4]
 
@@ -380,16 +497,39 @@ class GameInteractionLogistics:
             est_fps = round(1000.0 / max(1.0, elapsed_ms), 1)
 
             # Tactical Threat Assessment
-            tactical_state = "NOMINAL"
-            if health_pct < 35.0:
+            if game_state == "PLAYER_DEAD":
+                tactical_state = "PLAYER_DEFEATED"
+            elif game_state == "LOADING_OR_MENU":
+                tactical_state = "OUT_OF_COMBAT"
+            elif health_pct < 35.0:
                 tactical_state = "CRITICAL_HEALTH"
             elif len(nearest_targets) > 0 and nearest_targets[0]["distance_to_crosshair"] < 120:
                 tactical_state = "CLOSE_HOSTILE_ENGAGEMENT"
             elif len(nearest_targets) > 0:
                 tactical_state = "HOSTILES_IN_PERIMETER"
+            else:
+                tactical_state = "NOMINAL"
+
+            continuous_status = "INACTIVE"
+            if continuous_watch:
+                stop_requested = (
+                    window_title.strip().lower() == "stop"
+                    or auto_assist_keys.strip().lower() == "stop"
+                )
+                if stop_requested:
+                    if self._overwatch_handler:
+                        self._overwatch_handler(window_title, False, "")
+                    continuous_status = "STOPPED"
+                else:
+                    if self._overwatch_handler:
+                        self._overwatch_handler(window_title, True, auto_assist_keys)
+                    continuous_status = "ACTIVE"
 
             observation = {
                 "window": window_title,
+                "game_state": game_state,
+                "hud_archetype": archetype,
+                "continuous_overwatch": continuous_status,
                 "resolution": f"{w}x{h}",
                 "latency_ms": elapsed_ms,
                 "observation_fps": est_fps,
@@ -403,6 +543,7 @@ class GameInteractionLogistics:
                 "tactical_state": tactical_state,
             }
             self._last_observation = observation
+            self._last_game_state = game_state
             return json.dumps(observation, indent=2)
 
         future = self._executor.submit(_observe_worker)

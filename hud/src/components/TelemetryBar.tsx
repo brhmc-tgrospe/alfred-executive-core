@@ -22,6 +22,8 @@ interface TelemetryBarProps {
   ram: number;
   pingMs?: number;
   fps?: number;
+  mouseX?: number;
+  mouseY?: number;
   rmsVolume?: number;
   micLevel?: number;
   inputDevices?: AudioDevice[];
@@ -82,6 +84,8 @@ export function TelemetryBar({
   ram,
   pingMs = -1,
   fps = 60,
+  mouseX = 0,
+  mouseY = 0,
   rmsVolume = 0.0,
   micLevel,
   inputDevices = [],
@@ -238,6 +242,18 @@ export function TelemetryBar({
               }`}
             >
               {fps}
+            </span>
+          </div>
+
+          {/* Live Mouse Coordinates Pill */}
+          <div
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded-lg bg-slate-900/80 border border-slate-700/60 font-mono text-[9px]"
+            title={`Hardware OS Cursor Position: (${mouseX}, ${mouseY})`}
+          >
+            <MousePointerClick className="w-3 h-3 text-cyan-400" />
+            <span className="text-slate-400">XY:</span>
+            <span className="font-bold text-cyan-300">
+              {mouseX}, {mouseY}
             </span>
           </div>
         </div>

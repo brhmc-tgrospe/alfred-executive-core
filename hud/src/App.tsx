@@ -359,6 +359,8 @@ export function App() {
             ram={state.ram}
             pingMs={state.ping_ms}
             fps={fps}
+            mouseX={state.mouse_x}
+            mouseY={state.mouse_y}
             rmsVolume={state.rms_volume}
             micLevel={state.mic_level}
             inputDevices={state.input_devices}
@@ -425,6 +427,16 @@ export function App() {
             <span className="text-slate-400 capitalize">{state.status}</span>
           </div>
         ) : null}
+
+        {/* Subtle CURSOR readout beneath AudioOrb in Cinema Mode */}
+        {layoutMode === "cinema" && (
+          <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-1.5 pointer-events-none whitespace-nowrap opacity-75 font-mono text-[9px] tracking-widest text-cyan-400/90 uppercase">
+            <span>CURSOR</span>
+            <span className="text-slate-600">[</span>
+            <span>X: {state.mouse_x ?? 0}, Y: {state.mouse_y ?? 0}</span>
+            <span className="text-slate-600">]</span>
+          </div>
+        )}
 
         {/* Hover Mini-Pill: [-], [+], Size readout, [Center], and Mode Switchers */}
         <div

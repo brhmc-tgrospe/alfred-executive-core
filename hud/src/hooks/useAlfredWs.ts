@@ -55,21 +55,27 @@ export function useAlfredWs(url: string = "ws://127.0.0.1:8765/hud") {
               lastStateRef.current = packet;
               setState(packet);
             } else {
-              // High-frequency rms_volume and mic_level updates throttled to 10Hz (every 100ms)
+              // High-frequency rms_volume, mic_level, and mouse_x/y updates throttled to 10Hz (every 100ms)
               if (now - lastAudioThrottleRef.current >= 100) {
                 const rmsDiff = Math.abs((last.rms_volume ?? 0) - (packet.rms_volume ?? 0));
                 const micDiff = Math.abs((last.mic_level ?? 0) - (packet.mic_level ?? 0));
-                if (rmsDiff > 0.01 || micDiff > 0.01) {
+                const mouseChanged =
+                  last.mouse_x !== packet.mouse_x || last.mouse_y !== packet.mouse_y;
+                if (rmsDiff > 0.01 || micDiff > 0.01 || mouseChanged) {
                   lastAudioThrottleRef.current = now;
                   lastStateRef.current = {
                     ...lastStateRef.current,
                     rms_volume: packet.rms_volume,
                     mic_level: packet.mic_level,
+                    mouse_x: packet.mouse_x,
+                    mouse_y: packet.mouse_y,
                   };
                   setState((prev) => ({
                     ...prev,
                     rms_volume: packet.rms_volume,
                     mic_level: packet.mic_level,
+                    mouse_x: packet.mouse_x,
+                    mouse_y: packet.mouse_y,
                   }));
                 }
               }
