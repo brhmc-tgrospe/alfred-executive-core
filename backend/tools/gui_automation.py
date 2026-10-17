@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -141,8 +142,13 @@ def send_hardware_mouse_click(x: int, y: int, button: str = "left", hold_ms: flo
 class GuiAutomationLogistics:
     """Desktop GUI automation and visual co-editing suite."""
 
-    def __init__(self, vision_manager: Optional[VisionManager] = None) -> None:
+    def __init__(
+        self,
+        vision_manager: Optional[VisionManager] = None,
+        memory_store: Optional[Any] = None,
+    ) -> None:
         self.vision = vision_manager or VisionManager()
+        self.memory = memory_store
 
     def _find_window(self, app_name: str) -> Optional[Any]:
         """Finds the first visible window whose title contains app_name (case-insensitive)."""
@@ -576,6 +582,82 @@ class GuiAutomationLogistics:
         if pyautogui is None:
             return "Error: pyautogui is unavailable on this host."
 
+        act = action.strip().lower()
+
+        # Visual Learning Action: Capture clean un-occluded template & hover-state delta
+        if act in ("learn_element", "learn"):
+            if x < 0 or y < 0:
+                cx, cy = get_live_cursor_coords()
+                logger.info("[Pixel Navigation] Learning element at current cursor coordinates (%d, %d)", cx, cy)
+            else:
+                cx, cy = int(x), int(y)
+
+            elem_name = target_label_or_tag.strip() or f"element_{int(time.time())}"
+            slug = re.sub(r"[^a-z0-9_-]+", "_", elem_name.lower()).strip("_") or f"elem_{int(time.time())}"
+
+            tpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "memory", "visual_templates")
+            os.makedirs(tpl_dir, exist_ok=True)
+            tpl_path = os.path.abspath(os.path.join(tpl_dir, f"{slug}.png"))
+            hover_path = os.path.abspath(os.path.join(tpl_dir, f"{slug}_hover.png"))
+
+            # 1. Temporarily nudge OS cursor (cx + 120, cy + 120) for 60ms to eliminate cursor occlusion
+            if pyautogui is not None:
+                try:
+                    pyautogui.moveTo(cx + 120, cy + 120)
+                except Exception:
+                    pass
+            time.sleep(0.06)
+
+            # Capture clean 44x44 patch of the un-occluded icon
+            clean_patch = self.vision.capture_screen_patch(cx, cy, patch_size=44)
+            if clean_patch is not None and clean_patch.size > 0:
+                cv2.imwrite(tpl_path, clean_patch)
+
+            # 2. Move cursor back onto (cx, cy) for 300ms (hover state)
+            if pyautogui is not None:
+                try:
+                    pyautogui.moveTo(cx, cy)
+                except Exception:
+                    pass
+            time.sleep(0.30)
+
+            # Capture hovered 44x44 patch and 160x160 context patch
+            hover_patch = self.vision.capture_screen_patch(cx, cy, patch_size=44)
+            if hover_patch is not None and hover_patch.size > 0:
+                cv2.imwrite(hover_path, hover_patch)
+            _ = self.vision.capture_screen_patch(cx, cy, patch_size=160)
+
+            # Compute visual hover difference (cv2.absdiff)
+            hover_pct = 0.0
+            if clean_patch is not None and hover_patch is not None and clean_patch.shape == hover_patch.shape:
+                diff = cv2.absdiff(clean_patch, hover_patch)
+                gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+                changed_px = int(cv2.countNonZero((gray > 15).astype(np.uint8)))
+                total_px = max(1, gray.shape[0] * gray.shape[1])
+                hover_pct = (changed_px / float(total_px)) * 100.0
+
+            hover_desc = f"Hover state visual shift: {hover_pct:.1f}% pixel variance (border/tooltip delta)"
+
+            # Save learned visual memory
+            if hasattr(self, "memory") and self.memory is not None and hasattr(self.memory, "save_visual_ui_memory"):
+                self.memory.save_visual_ui_memory(
+                    element_key=elem_name,
+                    template_png_path=tpl_path,
+                    hover_template_png_path=hover_path,
+                    width=44,
+                    height=44,
+                    aliases=[elem_name.lower(), slug.replace("_", " ")],
+                    hover_behavior_desc=hover_desc,
+                    last_seen_x=cx,
+                    last_seen_y=cy,
+                )
+
+            return (
+                f"Visual element '{elem_name}' successfully learned at ({cx}, {cy}). "
+                f"Clean 44x44 template and hover state saved to visual memory ({hover_desc}). "
+                f"Future actions targeting '{elem_name}' will locate this element anywhere on screen via multi-scale template matching."
+            )
+
         # 1. Resolve coordinates if x or y is negative
         if x < 0 or y < 0:
             target_clean = target_label_or_tag.strip().lower() if target_label_or_tag else ""
@@ -602,7 +684,6 @@ class GuiAutomationLogistics:
         if x == -1 and y == -1:
             return "Error: Must provide either screen coordinates (x, y), a target tag/label, or specify target_label_or_tag='cursor' to click at the current mouse position."
 
-        act = action.strip().lower()
         try:
             screen_w, screen_h = pyautogui.size()
             if x < 0 or x >= screen_w or y < 0 or y >= screen_h:
@@ -626,6 +707,7 @@ class GuiAutomationLogistics:
                 change_pct_1 = (changed_px1 / float(total_px)) * 100.0
 
                 if change_pct_1 >= 1.5:
+                    self._auto_learn_on_click(x, y, target_label_or_tag, pre_patch)
                     return f"Successfully executed desktop mouse click at coordinates ({x}, {y}){tag_note} (visual response verified: {change_pct_1:.1f}% patch change)."
 
                 # Attempt 2: Bounded single retry with 80ms press hold to penetrate custom game UI loops
@@ -643,6 +725,7 @@ class GuiAutomationLogistics:
                 change_pct_2 = (changed_px2 / float(total_px)) * 100.0
 
                 if change_pct_2 >= 1.5:
+                    self._auto_learn_on_click(x, y, target_label_or_tag, pre_patch)
                     return f"Successfully executed desktop mouse click at coordinates ({x}, {y}){tag_note} on attempt 2 (visual response verified: {change_pct_2:.1f}% patch change)."
 
                 # Bounded 2-try limit reached: STOP immediately and return honest failure report!
@@ -847,4 +930,33 @@ class GuiAutomationLogistics:
         except Exception as e:
             logger.error("Error managing desktop window '%s': %s", matched_title, e)
             return f"Error executing '{action}' on window '{matched_title}': {e}"
+
+    def _auto_learn_on_click(self, x: int, y: int, target_label_or_tag: str, pre_patch: np.ndarray) -> None:
+        """Autonomously snapshots and persists template on confirmed click."""
+        if not target_label_or_tag or not hasattr(self, "memory") or self.memory is None:
+            return
+        clean_tag = target_label_or_tag.strip().lower()
+        if clean_tag in ("cursor", "mouse", "where my mouse is", "mouse cursor") or clean_tag.startswith("#"):
+            return
+        try:
+            slug = re.sub(r"[^a-z0-9_-]+", "_", clean_tag).strip("_")
+            tpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "memory", "visual_templates")
+            os.makedirs(tpl_dir, exist_ok=True)
+            tpl_path = os.path.abspath(os.path.join(tpl_dir, f"{slug}.png"))
+            if not os.path.exists(tpl_path) and pre_patch is not None and pre_patch.size > 0:
+                cv2.imwrite(tpl_path, pre_patch)
+                if hasattr(self.memory, "save_visual_ui_memory"):
+                    self.memory.save_visual_ui_memory(
+                        element_key=target_label_or_tag.strip(),
+                        template_png_path=tpl_path,
+                        width=pre_patch.shape[1],
+                        height=pre_patch.shape[0],
+                        aliases=[clean_tag],
+                        hover_behavior_desc="Auto-captured on verified click",
+                        last_seen_x=x,
+                        last_seen_y=y,
+                    )
+                    logger.info("[Pixel Navigation] Auto-learned visual template for '%s' at (%d, %d)", target_label_or_tag, x, y)
+        except Exception as e:
+            logger.debug("Auto-learn visual template error: %s", e)
 

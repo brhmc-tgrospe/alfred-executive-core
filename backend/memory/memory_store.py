@@ -8,6 +8,7 @@ Uses a fast, zero-dependency offline embedding model to eliminate cloud download
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -103,9 +104,13 @@ class MemoryStore:
         self.conn.row_factory = sqlite3.Row
         self._init_sqlite()
 
+        # Visual template storage directory
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.visual_templates_dir = os.path.join(base_dir, "visual_templates")
+        os.makedirs(self.visual_templates_dir, exist_ok=True)
+
         # 2. Initialize ChromaDB Vector Store
         if chroma_dir is None:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
             chroma_dir = os.path.join(base_dir, "chroma_data")
         self.chroma_dir = chroma_dir
         self.embedding_fn = embedding_function or FastLocalEmbeddingFunction()
@@ -151,6 +156,21 @@ class MemoryStore:
                     user_directive TEXT NOT NULL,
                     alfred_action TEXT,
                     learned_insight TEXT
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS visual_ui_memories (
+                    element_key TEXT PRIMARY KEY,
+                    aliases TEXT NOT NULL DEFAULT '[]',
+                    app_context TEXT DEFAULT '',
+                    template_png_path TEXT NOT NULL,
+                    hover_template_png_path TEXT DEFAULT '',
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    hover_behavior_desc TEXT DEFAULT '',
+                    last_seen_x INTEGER DEFAULT -1,
+                    last_seen_y INTEGER DEFAULT -1,
+                    updated_at_utc8 TEXT NOT NULL
                 );
             """)
             self.conn.commit()
@@ -577,6 +597,101 @@ class MemoryStore:
             profile,
         ]
         return "\n".join(summary)
+
+    def save_visual_ui_memory(
+        self,
+        element_key: str,
+        template_png_path: str,
+        width: int,
+        height: int,
+        aliases: Optional[List[str]] = None,
+        app_context: str = "",
+        hover_template_png_path: str = "",
+        hover_behavior_desc: str = "",
+        last_seen_x: int = -1,
+        last_seen_y: int = -1,
+    ) -> dict:
+        """Saves or updates a visual UI template memory record."""
+        norm_key = element_key.strip().lower()
+        alias_list = [a.strip().lower() for a in (aliases or []) if a.strip()]
+        if norm_key not in alias_list:
+            alias_list.append(norm_key)
+        aliases_json = json.dumps(alias_list)
+        updated_utc8 = get_utc8_now_str()
+
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                INSERT INTO visual_ui_memories (
+                    element_key, aliases, app_context, template_png_path,
+                    hover_template_png_path, width, height, hover_behavior_desc,
+                    last_seen_x, last_seen_y, updated_at_utc8
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(element_key) DO UPDATE SET
+                    aliases = excluded.aliases,
+                    app_context = excluded.app_context,
+                    template_png_path = excluded.template_png_path,
+                    hover_template_png_path = excluded.hover_template_png_path,
+                    width = excluded.width,
+                    height = excluded.height,
+                    hover_behavior_desc = excluded.hover_behavior_desc,
+                    last_seen_x = excluded.last_seen_x,
+                    last_seen_y = excluded.last_seen_y,
+                    updated_at_utc8 = excluded.updated_at_utc8;
+            """, (
+                norm_key, aliases_json, app_context, template_png_path,
+                hover_template_png_path, width, height, hover_behavior_desc,
+                last_seen_x, last_seen_y, updated_utc8
+            ))
+            self.conn.commit()
+
+        return {
+            "element_key": norm_key,
+            "aliases": alias_list,
+            "app_context": app_context,
+            "template_png_path": template_png_path,
+            "hover_template_png_path": hover_template_png_path,
+            "width": width,
+            "height": height,
+            "hover_behavior_desc": hover_behavior_desc,
+            "last_seen_x": last_seen_x,
+            "last_seen_y": last_seen_y,
+            "updated_at_utc8": updated_utc8,
+        }
+
+    def get_visual_ui_memory(self, query_or_name: str) -> Optional[dict]:
+        """Retrieves a visual UI template memory by exact key, alias, or fuzzy substring."""
+        if not query_or_name:
+            return None
+        norm_query = query_or_name.strip().lower()
+
+        with self._lock:
+            cursor = self.conn.cursor()
+            # 1. Exact match on element_key
+            cursor.execute("SELECT * FROM visual_ui_memories WHERE element_key = ?", (norm_query,))
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+
+            # 2. Check all rows for substring or alias matches
+            cursor.execute("SELECT * FROM visual_ui_memories ORDER BY updated_at_utc8 DESC")
+            rows = cursor.fetchall()
+            for r in rows:
+                key = r["element_key"].lower()
+                if norm_query in key or key in norm_query:
+                    return dict(r)
+                aliases = json.loads(r["aliases"] or "[]")
+                if any(norm_query in a.lower() or a.lower() in norm_query for a in aliases):
+                    return dict(r)
+
+        return None
+
+    def list_visual_ui_memories(self) -> List[dict]:
+        """Lists all stored visual UI memories ordered by latest update."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT * FROM visual_ui_memories ORDER BY updated_at_utc8 DESC")
+            return [dict(r) for r in cursor.fetchall()]
 
     def close(self) -> None:
         """Closes the SQLite database connection."""

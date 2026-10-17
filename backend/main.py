@@ -102,7 +102,9 @@ class AlfredHubCoordinator:
         # Core Components
         self.memory = memory_store or MemoryStore()
         self.audio = audio_manager or AudioManager()
-        self.vision = vision_manager or VisionManager()
+        self.vision = vision_manager or VisionManager(memory_store=self.memory)
+        if not getattr(self.vision, "memory", None):
+            self.vision.memory = self.memory
 
         # OS Logistics Tools with approval hook
         self.logistics = OSLogistics(
@@ -116,7 +118,9 @@ class AlfredHubCoordinator:
         self.dev_logistics = DevLogistics()
 
         # GUI Automation Logistics Tools
-        self.gui_logistics = GuiAutomationLogistics()
+        self.gui_logistics = GuiAutomationLogistics(memory_store=self.memory)
+        if not getattr(self.gui_logistics, "memory", None):
+            self.gui_logistics.memory = self.memory
 
         # Browser Automation Logistics Tools
         self.browser_logistics = BrowserAutomationLogistics()
@@ -436,6 +440,10 @@ class AlfredHubCoordinator:
 
     async def _execute_fallback_prompt(self, text: str) -> None:
         """Generates an immediate executive fallback response when Gemini Live is in standby or offline."""
+        if getattr(self.live_core, "active_tool", None) is not None:
+            logger.info("[Fallback Ignored] A tool is currently executing (%s). Bypassing fallback.", self.live_core.active_tool)
+            return
+
         self.live_core.set_status("thinking")
         self.current_transcript = f"› Directive: \"{text}\""
         await self.broadcast_state_packet()
@@ -538,6 +546,8 @@ class AlfredHubCoordinator:
                 return
 
             self.on_user_utterance(text)
+            self.live_core._current_turn_id += 1
+            self.audio.clear_playback()
 
             if is_shutdown_authorized(text):
                 logger.warning("Directive 'terminate executive commands alfred' received via text_prompt!")

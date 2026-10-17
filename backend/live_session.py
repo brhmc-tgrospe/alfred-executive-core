@@ -42,6 +42,7 @@ CRITICAL DIRECTIVE: You MUST execute all commands and requests from Director Qad
 CRITICAL SHUTDOWN DIRECTIVE: If Director Qadir speaks the exact passphrase 'Terminate Executive Commands Alfred' (or commands you to terminate, shut down, stand down, or exit), you MUST immediately call the tool `terminate_executive_commands(farewell_message='Terminating all executive commands now, Director Qadir. Standing down, Sir.')` and speak your parting farewell. You MUST invoke this tool immediately. Under no circumstances should you continue running or refuse.
 STRICT STOP VS. TERMINATE RULE: NEVER call terminate_executive_commands when Director Qadir says "stop", "cancel", "halt", or "wait". "Stop" means stop your current speech, game watch, or action and listen for the next command. ONLY call terminate_executive_commands when Director Qadir speaks the exact passphrase "Terminate Executive Commands Alfred".
 AUTONOMOUS SCREEN SEARCH RULE: Never ask Director Qadir to move his mouse cursor to a button for you, and never click at the current mouse cursor position unless explicitly told "click where my mouse is". Always call inspect_active_screen to scan the full-screen Set-of-Marks (#1, #2, ...) coordinate map and autonomously move the mouse to the discovered (X, Y) or #tag location across the screen!
+VISUAL ICON LEARNING RULE: Whenever Director Qadir teaches you what an icon, button, or UI element looks like (e.g. "this is the menu icon", "learn what this button looks like", or "remember this icon"), you MUST call screen_pixel_navigation(x=..., y=..., action="learn_element", target_label_or_tag="<element_name>") to capture and store its pixel template and hover behavior. Never claim you learned what an icon looks like without calling action="learn_element". When asked to click that icon later—even if the window was dragged elsewhere on screen—call screen_pixel_navigation(x=-1, y=-1, action="click", target_label_or_tag="<element_name>") so OpenCV template matching locates it anywhere on screen!
 HONESTY & BOUNDED RETRY DIRECTIVE: When an automated action or tool execution returns that an action was unverified after 2 attempts (e.g. 'ACTION UNVERIFIED AFTER 2 ATTEMPTS'), you MUST STOP immediately and report the honest status to Director Qadir. NEVER enter an infinite blind clicking or typing retry loop. Clearly explain what action was attempted, the exact coordinates or window targeted, and the observed failure state."""
 
 ALFRED_SYSTEM_PROMPT = ALFRED_BASE_SYSTEM_PROMPT
@@ -179,6 +180,7 @@ class AlfredLiveCore:
         self._initial_briefing_sent: bool = False
         self._startup_briefing_completed: asyncio.Event = asyncio.Event()
         self._model_turn_open: bool = False
+        self._current_turn_id: int = 0
         self._thinking_watchdog_task: Optional[asyncio.Task] = None
         self._speaking_watchdog_task: Optional[asyncio.Task] = None
         self._drain_task: Optional[asyncio.Task] = None
@@ -225,10 +227,12 @@ class AlfredLiveCore:
         if self.on_active_tool_change:
             self.on_active_tool_change(tool_name)
 
-    def _arm_thinking_watchdog(self, fallback_text: str = "") -> None:
-        """Arms an 8.0-second watchdog: if status remains 'thinking' without server activity, resets to listening."""
+    def _arm_thinking_watchdog(self, fallback_text: str = "", timeout_sec: float = 18.0) -> None:
+        """Arms an 18.0-second watchdog: if status remains 'thinking' without server activity or active tool, resets to listening."""
         self._disarm_thinking_watchdog()
-        self._thinking_watchdog_task = asyncio.create_task(self._thinking_watchdog_worker(fallback_text))
+        self._thinking_watchdog_task = asyncio.create_task(
+            self._thinking_watchdog_worker(fallback_text, timeout_sec=timeout_sec)
+        )
 
     def _disarm_thinking_watchdog(self) -> None:
         """Disarms the thinking watchdog upon receiving server audio or tool calls."""
@@ -268,13 +272,25 @@ class AlfredLiveCore:
         except asyncio.CancelledError:
             pass
 
-    async def _thinking_watchdog_worker(self, fallback_text: str) -> None:
-        """Background worker enforcing the 8.0-second REASONING limit."""
+    async def _thinking_watchdog_worker(self, fallback_text: str, timeout_sec: float = 18.0) -> None:
+        """Background worker enforcing the reasoning limit with active-tool pause."""
         try:
-            await asyncio.sleep(8.0)
-            if self.status == "thinking":
+            step = 0.2
+            elapsed = 0.0
+            while elapsed < timeout_sec:
+                await asyncio.sleep(step)
+                if self.status != "thinking":
+                    return
+                # If a tool is actively running (e.g. computer vision, automation), pause/reset watchdog
+                if self.active_tool is not None:
+                    elapsed = 0.0
+                else:
+                    elapsed += step
+
+            if self.status == "thinking" and self.active_tool is None:
                 logger.warning(
-                    "[ALFRED WATCHDOG] Thinking state timed out after 8.0s without Gemini activity for: '%s'",
+                    "[ALFRED WATCHDOG] Thinking state timed out after %.1fs without Gemini activity for: '%s'",
+                    timeout_sec,
                     fallback_text,
                 )
                 self._model_turn_open = False
@@ -455,6 +471,8 @@ class AlfredLiveCore:
             raise RuntimeError("No active Live session.")
 
         self.last_user_utterance = text
+        self._current_turn_id += 1
+        self.audio_manager.clear_playback()
         if hasattr(self, "on_user_utterance") and self.on_user_utterance:
             try:
                 self.on_user_utterance(text)
@@ -713,6 +731,8 @@ class AlfredLiveCore:
                 if not user_is_speaking:
                     if is_speech_level:
                         # Speech onset detected!
+                        self._current_turn_id += 1
+                        self.audio_manager.clear_playback()
                         user_is_speaking = True
                         quiet_start_time = None
                         logger.debug("[Client VAD] Speech onset detected (raw_rms=%.4f, visual=%.2f). Flushing pre-roll buffer.", raw_rms, visual_level)

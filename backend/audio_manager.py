@@ -82,8 +82,8 @@ class AudioManager:
         self._playback_buffer: bytearray = bytearray()
         self._playback_lock: threading.Lock = threading.Lock()
 
-        # 120ms Jitter Pre-Buffer (at 24kHz 16-bit mono: 0.12s * 24000 samples/s * 2 bytes/sample = 5760 bytes)
-        self.jitter_prebuffer_bytes: int = int(0.12 * self.output_sample_rate * 2 * self.channels)
+        # 50ms Jitter Pre-Buffer (at 24kHz 16-bit mono: 0.05s * 24000 samples/s * 2 bytes/sample = 2400 bytes)
+        self.jitter_prebuffer_bytes: int = int(0.05 * self.output_sample_rate * 2 * self.channels)  # 2400 bytes
         self._prebuffering: bool = True
         self._turn_complete: bool = False
         self.underflow_count: int = 0
@@ -275,10 +275,10 @@ class AudioManager:
                 self._turn_complete = False
                 return
 
-            # 2. Jitter Pre-buffering: wait until 120ms of audio has arrived, or turn is explicitly complete,
-            # or prebuffering timed out (>150ms since last chunk arrival) to prevent deadlocking short utterances
+            # 2. Jitter Pre-buffering: wait until 50ms of audio has arrived, or turn is explicitly complete,
+            # or prebuffering timed out (>80ms since last chunk arrival) to prevent deadlocking short utterances
             if self._prebuffering:
-                prebuffer_timed_out = (time.time() - self._last_playback_time) > 0.15
+                prebuffer_timed_out = (time.time() - self._last_playback_time) > 0.08
                 if buf_len >= self.jitter_prebuffer_bytes or self._turn_complete or prebuffer_timed_out:
                     self._prebuffering = False
                     self.is_playing = True

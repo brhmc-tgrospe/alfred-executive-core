@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import io
 import logging
+import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 import cv2
@@ -55,9 +56,15 @@ def _get_os_cursor_pos() -> Optional[Tuple[int, int]]:
 class VisionManager:
     """Manages high-speed display capture, 1920x1080 full frames, and 2.0x cursor magnifier crops."""
 
-    def __init__(self, target_width: int = 1920, jpeg_quality: int = 88) -> None:
+    def __init__(
+        self,
+        target_width: int = 1920,
+        jpeg_quality: int = 88,
+        memory_store: Optional[Any] = None,
+    ) -> None:
         self.target_width = target_width
         self.jpeg_quality = jpeg_quality
+        self.memory = memory_store
         self._last_frame: Optional[bytes] = None
         self._som_cache: Dict[str, Any] = {}
 
@@ -449,16 +456,96 @@ class VisionManager:
         _, enc = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 88])
         return enc.tobytes(), som_dict
 
+    def _match_learned_visual_template(self, target_query: str) -> Optional[Dict[str, Any]]:
+        """Multi-scale OpenCV template matching against learned visual UI memories."""
+        if not hasattr(self, "memory") or self.memory is None:
+            return None
+        if not hasattr(self.memory, "get_visual_ui_memory"):
+            return None
+
+        mem = self.memory.get_visual_ui_memory(target_query)
+        if not mem:
+            return None
+
+        tpl_path = mem.get("template_png_path", "")
+        if not tpl_path or not os.path.exists(tpl_path):
+            return None
+
+        try:
+            template = cv2.imread(tpl_path, cv2.IMREAD_COLOR)
+            if template is None or template.size == 0:
+                return None
+
+            screen_pil = self._grab_raw_image()
+            if screen_pil is None:
+                return None
+            screen_bgr = cv2.cvtColor(np.array(screen_pil), cv2.COLOR_RGB2BGR)
+
+            th, tw = template.shape[:2]
+            sh, sw = screen_bgr.shape[:2]
+            if th > sh or tw > sw:
+                return None
+
+            best_max_val = -1.0
+            best_match_loc = (0, 0)
+            best_scale = 1.0
+            best_scaled_size = (tw, th)
+
+            scales = [0.85, 1.0, 1.15]
+            for s in scales:
+                sw_scaled = int(round(tw * s))
+                sh_scaled = int(round(th * s))
+                if sw_scaled > sw or sh_scaled > sh or sw_scaled < 4 or sh_scaled < 4:
+                    continue
+
+                if s == 1.0:
+                    scaled_tpl = template
+                else:
+                    scaled_tpl = cv2.resize(
+                        template,
+                        (sw_scaled, sh_scaled),
+                        interpolation=cv2.INTER_AREA if s < 1.0 else cv2.INTER_LINEAR,
+                    )
+
+                res = cv2.matchTemplate(screen_bgr, scaled_tpl, cv2.TM_CCOEFF_NORMED)
+                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+
+                if max_val > best_max_val:
+                    best_max_val = max_val
+                    best_match_loc = max_loc
+                    best_scale = s
+                    best_scaled_size = (sw_scaled, sh_scaled)
+
+            logger.info(
+                "[Visual Template Match] Query '%s' -> template '%s' best match val: %.3f (scale: %.2f)",
+                target_query, mem.get("element_key", ""), best_max_val, best_scale
+            )
+
+            if best_max_val >= 0.75:
+                bx, by = best_match_loc
+                bw, bh = best_scaled_size
+                cx = int(round(bx + bw / 2.0))
+                cy = int(round(by + bh / 2.0))
+                return {
+                    "found": True,
+                    "center": (cx, cy),
+                    "tag": mem.get("element_key", ""),
+                    "label": f"Learned Visual Template: {mem.get('element_key', '')} (conf={best_max_val:.2f})",
+                    "rect": (bx, by, bw, bh),
+                    "confidence": float(best_max_val),
+                }
+        except Exception as e:
+            logger.warning("[Visual Template Match] Error matching template for '%s': %s", target_query, e)
+
+        return None
+
     def autonomous_screen_search(self, target_query: str, window_title: str = "active") -> Dict[str, Any]:
         """Autonomously searches the full screen/window for a target UI element, button, or spatial region.
 
-        1. Checks current Set-of-Marks cache for tag, label, or spatial keyword match.
-        2. If not found in cache, refreshes detect_ui_elements_and_annotate_grid(window_title) across the entire screen.
-        3. Performs multi-scale lookup:
-           - Direct tag match (#N or N).
-           - Element label match (e.g. 'submit', 'save', 'file').
-           - Spatial region keywords (e.g. 'top right', 'taskbar', 'close button', 'center').
-           - Win32 child window titles.
+        Priority 1: Learned Visual Template Multi-Scale Matching (cv2.TM_CCOEFF_NORMED @ 0.85x, 1.0x, 1.15x).
+        Priority 2: Existing Set-of-Marks Cache lookup.
+        Priority 3: Full-screen contour and Win32 UI refresh.
+        Priority 4: Spatial keyword regions (e.g. 'top right', 'taskbar', 'close button').
 
         Args:
             target_query: The name, label, tag, or spatial description of the element to find.
@@ -470,6 +557,11 @@ class VisionManager:
         q = (target_query or "").strip().lower()
         if not q:
             return {"found": False, "center": (-1, -1), "tag": "", "label": "", "reason": "Empty target query."}
+
+        # Priority 1: Learned Visual Template Multi-Scale Matching
+        learned_match = self._match_learned_visual_template(q)
+        if learned_match is not None:
+            return learned_match
 
         def _search_in_cache(c: dict) -> Optional[Dict[str, Any]]:
             if not c:
