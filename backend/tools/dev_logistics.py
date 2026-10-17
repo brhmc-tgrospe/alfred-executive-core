@@ -89,11 +89,36 @@ SOFTWARE_SHORTCUTS_AND_ICONS: Dict[str, Dict[str, str]] = {
 }
 
 
-class DevLogistics:
-    """Developer logistics tools for repository analysis, port auditing, and network diagnostics."""
+# Statutory, legal, and domain reference corpus for instant offline/hybrid executive synthesis
+STATUTORY_AND_DOMAIN_KNOWLEDGE: Dict[str, str] = {
+    "labor code": (
+        "Philippine Labor Code (Presidential Decree No. 442, as amended): "
+        "Book I (Pre-Employment), Book II (Human Resources Development), "
+        "Book III (Conditions of Employment: Art. 83 Normal Hours of Work = 8 hours/day; Art. 87 Overtime Work +25% regular / +30% holiday or rest day; Art. 91-93 Weekly Rest Periods & Holiday Pay; Art. 95 Service Incentive Leave = 5 days with pay after 1 year of service), "
+        "Book IV (Health, Safety and Social Welfare Benefits), Book V (Labor Relations & Collective Bargaining), "
+        "Book VI (Post-Employment: Art. 294 [formerly 279] Security of Tenure; Art. 297 [282] Just Causes for Termination requiring Twin-Notice & Hearing procedural due process; Art. 298-299 [283-284] Authorized Causes & Separation Pay)."
+    ),
+    "civil service": (
+        "Civil Service Commission (CSC) Laws & Rules (1987 Constitution Art. IX-B; E.O. No. 292 Book V; 2017 ORAOHRA & 2017 RACCS): "
+        "Governs all branches, subdivisions, instrumentalities, and agencies of the Philippine Government. "
+        "Appointments are classified into Career Service (First, Second, and Third Levels requiring CSC Eligibility/CSPE) and Non-Career Service. "
+        "Omnibus Rules on Leave: 15 days Vacation Leave (VL) and 15 days Sick Leave (SL) annually with full pay (cumulative), plus 3 days Special Privilege Leave (SPL) and 5 days Mandatory/Forced Leave. "
+        "Security of tenure guarantees no civil service officer or employee shall be suspended or dismissed except for cause provided by law and after due process under the 2017 Rules on Administrative Cases in the Civil Service (RACCS)."
+    ),
+    "csc": (
+        "Civil Service Commission (CSC) Statutory Digest (E.O. 292 / ORAOHRA / RACCS): "
+        "Merit and fitness principle via competitive examination; 8 hours/day and 40 hours/week government work schedule; "
+        "15 days Vacation Leave + 15 days Sick Leave cumulative credits per year; strict administrative due process (Formal Charge / Show-Cause Order, Answer, Investigation, Decision) for grave, less grave, and light offenses."
+    ),
+}
 
-    def __init__(self, vision_manager: Optional[VisionManager] = None) -> None:
+
+class DevLogistics:
+    """Developer logistics tools for repository analysis, port auditing, network diagnostics, and deep topic/statutory research."""
+
+    def __init__(self, vision_manager: Optional[VisionManager] = None, memory_store: Optional[Any] = None) -> None:
         self.vision = vision_manager or VisionManager()
+        self.memory = memory_store
 
     def inspect_git_workspace(self, repo_path: str = ".") -> str:
         """Inspects the local git repository: active branch, status, diff summary, and recent commits.
@@ -509,30 +534,32 @@ class DevLogistics:
         return "\n".join(lines)
 
     def research_software_interface_and_docs(
-        self, application_name: str, feature_or_icon_query: str, probe_hover_tooltip: bool = False
+        self, application_name: str, feature_or_icon_query: str = "", probe_hover_tooltip: bool = False
     ) -> str:
-        """Researches official documentation, keyboard shortcuts, and UI icon meanings for complex software interfaces.
-
-        Combines a high-speed cached shortcut/icon knowledge base (covering Word, Excel, VS Code, browsers)
-        with live web manual scraping for unfamiliar applications. Can probe and capture native tooltips.
+        """Researches official documentation, statutory/legal codes, technical frameworks, keyboard shortcuts, and UI icons, automatically persisting synthesized knowledge into long-term memory.
 
         Args:
-            application_name: Name of target software (e.g. 'Word', 'Excel', 'VS Code', 'Chrome', 'Blender').
-            feature_or_icon_query: Specific tool, icon, ribbon tab, or action to look up (e.g. 'track changes', 'autosum', 'toggle terminal').
+            application_name: Name of target software, domain, or statute (e.g. 'Word', 'VS Code', 'Philippine Labor Code', 'Civil Service Commission').
+            feature_or_icon_query: Specific topic, law, feature, icon, or action to research (e.g. 'Philippine Labor Code and CSC laws', 'track changes', 'extrude mesh').
             probe_hover_tooltip: If True, hovers at cursor for 450ms and captures a 2.0x Cursor Magnifier frame for tooltip inspection.
 
         Returns:
-            Concise operational manual instructions and verified keyboard shortcuts.
+            Structured research digest with verified provisions/shortcuts and confirmation of semantic memory persistence.
         """
-        app_clean = application_name.strip()
-        query_clean = feature_or_icon_query.strip()
-        if not app_clean or not query_clean:
-            return "Error: Both application_name and feature_or_icon_query must be provided."
+        app_clean = (application_name or "").strip()
+        query_clean = (feature_or_icon_query or "").strip()
+        if not app_clean and not query_clean:
+            return "Error: Both application_name and feature_or_icon_query cannot be empty."
+        if not query_clean:
+            query_clean = app_clean
+        if not app_clean:
+            app_clean = "General Knowledge & Statutory Research"
 
         app_lower = app_clean.lower()
         query_lower = query_clean.lower()
+        combined_lower = f"{app_lower} {query_lower}"
 
-        # 1. Match against built-in high-speed knowledge base
+        # 1. Match against built-in high-speed software shortcut knowledge base
         matched_category = None
         if "word" in app_lower:
             matched_category = "word"
@@ -545,61 +572,101 @@ class DevLogistics:
 
         doc_result = None
         source_label = "Built-in High-Speed Interface Cache"
+        synthesized_chunks: List[str] = []
 
         if matched_category and matched_category in SOFTWARE_SHORTCUTS_AND_ICONS:
             cat_dict = SOFTWARE_SHORTCUTS_AND_ICONS[matched_category]
-            # Exact or fuzzy match on query key
             for key, val in cat_dict.items():
                 if key in query_lower or query_lower in key:
                     doc_result = f"• Action/Feature: {key.title()}\n• Shortcut / UI Guidance: {val}"
+                    synthesized_chunks.append(f"[{app_clean} - {key.title()}]: {val}")
                     break
 
-        # 2. Live Web Documentation Scraper fallback if not in built-in cache
-        if not doc_result:
-            source_label = "Live Documentation Scraper"
+        # 2. Match against Statutory & Domain Reference Corpus (e.g. Philippine Labor Code, CSC Laws)
+        statutory_matches: List[str] = []
+        for stat_key, stat_summary in STATUTORY_AND_DOMAIN_KNOWLEDGE.items():
+            if stat_key in combined_lower:
+                if stat_summary not in statutory_matches:
+                    statutory_matches.append(stat_summary)
+
+        if statutory_matches and not doc_result:
+            source_label = "Executive Statutory & Domain Reference Corpus + Web Digest"
+            for sm in statutory_matches:
+                synthesized_chunks.append(sm)
+            doc_result = "\n".join(f"• Statutory/Domain Provision: {sm}" for sm in statutory_matches)
+
+        # 3. Live Web / Reference Scraper (strict 8.0s HTTP timeout)
+        if not matched_category or not doc_result:
+            if not doc_result:
+                source_label = "Live Documentation & Topic Researcher"
             try:
-                search_query = f"{app_clean} {query_clean} shortcut manual documentation"
+                is_statutory_or_topic = bool(statutory_matches) or any(
+                    w in combined_lower for w in ("law", "code", "csc", "civil service", "statute", "labor", "rule", "republic act", "policy")
+                )
+                search_query = (
+                    f"{app_clean} {query_clean}"
+                    if is_statutory_or_topic
+                    else f"{app_clean} {query_clean} shortcut manual documentation"
+                )
                 url = f"https://html.duckduckgo.com/html/?q={search_query.replace(' ', '+')}"
                 headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ALFRED-Executive-Core/1.0"}
-                resp = httpx.get(url, headers=headers, timeout=4.0, follow_redirects=True)
+                resp = httpx.get(url, headers=headers, timeout=8.0, follow_redirects=True)
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, "html.parser")
                     snippets = []
-                    for res in soup.find_all("a", class_="result__snippet", limit=3):
+                    for res in soup.find_all("a", class_="result__snippet", limit=4):
                         txt = res.get_text(strip=True)
                         if txt:
                             snippets.append(txt)
                     if not snippets:
-                        for el in soup.find_all(["p", "li", "main"], limit=5):
+                        for el in soup.find_all(["p", "li", "main"], limit=6):
                             txt = el.get_text(strip=True)
                             if len(txt) > 20:
                                 snippets.append(txt)
-                                if len(snippets) >= 2:
+                                if len(snippets) >= 3:
                                     break
                     if snippets:
-                        joined_snippets = " ".join(snippets)[:450]
-                        doc_result = f"• Retrieved Manual Snippet: {joined_snippets}\n• Search Target: '{search_query}'"
+                        joined_snippets = " ".join(snippets)[:650]
+                        synthesized_chunks.append(joined_snippets)
+                        if doc_result:
+                            doc_result += f"\n• Web Reference Digest: {joined_snippets}"
+                        else:
+                            doc_result = f"• Retrieved Manual/Reference Snippet: {joined_snippets}\n• Search Target: '{search_query}'"
             except Exception as e:
-                # Graceful offline fallback
-                doc_result = (
-                    f"• Standard Guidance: In {app_clean}, look for '{query_clean}' under the main menu bar or search with F1/Ctrl+Shift+P.\n"
-                    f"• Diagnostic note: Web scraper offline/timeout ({e})."
-                )
+                if not doc_result:
+                    doc_result = (
+                        f"• Standard Guidance: In {app_clean}, look for '{query_clean}' under the main menu bar or search with F1/Ctrl+Shift+P.\n"
+                        f"• Diagnostic note: Web scraper offline/timeout ({e})."
+                    )
 
         if not doc_result:
             doc_result = (
                 f"• Guidance: Navigate to {app_clean} menu options or settings, or press Alt to reveal ribbon/menu access keys for '{query_clean}'."
             )
 
+        # 4. Auto-Persist Synthesized Knowledge into Long-Term Semantic Memory (ChromaDB + SQLite)
+        memory_status = "Skipped (no memory store attached)"
+        if self.memory is not None and hasattr(self.memory, "remember_fact"):
+            try:
+                knowledge_payload = (
+                    f"Topic [{app_clean} — {query_clean}]: "
+                    + (" | ".join(synthesized_chunks) if synthesized_chunks else doc_result)
+                )
+                self.memory.remember_fact(category="research_knowledge", content=knowledge_payload[:1200])
+                memory_status = "Committed to long-term semantic memory (category='research_knowledge')"
+            except Exception as mem_err:
+                memory_status = f"Persistence warning: {mem_err}"
+
         output_lines = [
-            f"=== Software Interface & Manual Analysis ===",
-            f"• Target Application: {app_clean}",
-            f"• Query: '{query_clean}'",
+            "=== Deep Topic, Statutory & Documentation Research Digest ===",
+            f"• Target Domain / Application: {app_clean}",
+            f"• Research Query: '{query_clean}'",
             f"• Knowledge Source: {source_label}",
+            f"• Semantic Memory Ingestion: {memory_status}",
             doc_result,
         ]
 
-        # 3. Native Hover Tooltip Probe (Constraint 5b)
+        # 5. Native Hover Tooltip Probe (Constraint 5b)
         if probe_hover_tooltip:
             try:
                 time.sleep(0.45)  # 450ms hover pause for native OS tooltip to render

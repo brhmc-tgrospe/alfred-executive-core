@@ -67,8 +67,11 @@ def is_stop_command(utterance: str) -> bool:
     return any(p in text for p in ["stop that", "stop it", "stop please", "cancel that"])
 
 
-def get_dynamic_system_prompt(memory_store: Optional[MemoryStore] = None) -> str:
-    """Builds a live dynamic system prompt injecting UTC+8 timestamp and Director Qadir's learned profile."""
+def get_dynamic_system_prompt(
+    memory_store: Optional[MemoryStore] = None,
+    recent_turns: Optional[List[str]] = None,
+) -> str:
+    """Builds a live dynamic system prompt injecting UTC+8 timestamp, Director Qadir's learned profile, and recent conversation turns."""
     utc8_now = get_utc8_now_str()
     profile = ""
     if memory_store is not None:
@@ -83,6 +86,13 @@ def get_dynamic_system_prompt(memory_store: Optional[MemoryStore] = None) -> str
     ]
     if profile:
         prompt_parts.append(f"\n{profile}")
+
+    if recent_turns:
+        last_five = recent_turns[-5:]
+        turns_block = "\n".join(f"  - {t}" for t in last_five)
+        prompt_parts.append(
+            f"\n[RECENT CONVERSATION CONTINUITY (Last {len(last_five)} Turns)]:\n{turns_block}"
+        )
 
     return "\n".join(prompt_parts)
 
@@ -117,7 +127,10 @@ class AlfredLiveCore:
         self.audio_manager = audio_manager
         self.vision_manager = vision_manager or VisionManager()
         self.memory = memory_store or MemoryStore()
-        self.dev_logistics = dev_logistics or DevLogistics()
+        self.dev_logistics = dev_logistics or DevLogistics(
+            vision_manager=self.vision_manager,
+            memory_store=self.memory,
+        )
         self.gui_logistics = gui_logistics or GuiAutomationLogistics()
         self.browser_logistics = browser_logistics or BrowserAutomationLogistics()
         self.game_logistics = game_logistics or GameInteractionLogistics()
@@ -177,7 +190,16 @@ class AlfredLiveCore:
         self.is_running: bool = False
         self._loop_active: bool = False
         self._session: Any = None
+        self._session_active: bool = True
+        self._session_connected_at: float = 0.0
+        self._last_activity_at: float = 0.0
+        self.max_session_duration_sec: float = 720.0  # 12 minutes proactive refresh before Google's 15m cutoff
+        self.tool_execution_timeout_sec: float = 15.0  # Hard 15s timeout on tool calls
         self._initial_briefing_sent: bool = False
+        self._initial_greeting_done: bool = False
+        self._recent_transcript_turns: List[str] = []
+        self._session_tasks: List[asyncio.Task] = []
+        self._session_ready_event: asyncio.Event = asyncio.Event()
         self._startup_briefing_completed: asyncio.Event = asyncio.Event()
         self._model_turn_open: bool = False
         self._current_turn_id: int = 0
@@ -204,12 +226,40 @@ class AlfredLiveCore:
         if hasattr(self.game_logistics, "set_overwatch_handler"):
             self.game_logistics.set_overwatch_handler(self.handle_overwatch_request)
 
+    @property
+    def session(self) -> Any:
+        """Exposes the active Gemini Live session reference."""
+        return self._session
+
+    @session.setter
+    def session(self, val: Any) -> None:
+        self._session = val
+
+    def _close_active_session_tasks(self) -> None:
+        """Marks the current WebSocket session inactive and cancels sibling TaskGroup tasks to prevent zombie sockets."""
+        self._session_active = False
+        current = asyncio.current_task()
+        for t in list(self._session_tasks):
+            if t is not None and t is not current and not t.done():
+                t.cancel()
+
+    def _record_recent_turn(self, turn_text: str) -> None:
+        """Records a conversation turn into the rolling continuity buffer (max 10 entries, last 5 injected on reconnect)."""
+        cleaned = (turn_text or "").strip()
+        if not cleaned:
+            return
+        self._recent_transcript_turns.append(cleaned)
+        if len(self._recent_transcript_turns) > 10:
+            self._recent_transcript_turns = self._recent_transcript_turns[-10:]
+
     def set_shutdown_callback(self, cb: Callable[[str], Any]) -> None:
         """Configures callback invoked upon graceful executive shutdown."""
         self._shutdown_callback = cb
 
     def update_transcript(self, text: str) -> None:
         """Notifies coordinator and connected HUD clients with status or transcript update with strict UTC+8 timestamp prefix."""
+        if text and not text.startswith("[LIVE API"):
+            self._record_recent_turn(text)
         if self.on_transcript:
             if not text.startswith("[") or "UTC+8" not in text[:25]:
                 text = f"{get_utc8_timestamp(full=False)} {text}"
@@ -498,11 +548,13 @@ class AlfredLiveCore:
             pass
 
     async def send_text_prompt(self, text: str) -> None:
-        """Sends a text directive turn to the active Gemini Live session with watchdog protection."""
-        if not self._session or not self.is_running:
+        """Sends a text directive turn to the active Gemini Live session with wake-on-prompt reconnect and watchdog protection."""
+        if not self._session and not self.is_running and not self._loop_active and self.on_thinking_timeout is None:
             raise RuntimeError("No active Live session.")
 
+        self._last_activity_at = time.time()
         self.last_user_utterance = text
+        self._record_recent_turn(f"[Director Qadir]: {text}")
         self._current_turn_id += 1
         self.audio_manager.clear_playback()
         if hasattr(self, "on_user_utterance") and self.on_user_utterance:
@@ -524,13 +576,14 @@ class AlfredLiveCore:
             self.set_status("speaking")
             self.update_transcript(self._shutdown_farewell)
             asyncio.create_task(self._ensure_shutdown_drain_completed(timeout=6.0))
-            try:
-                await self._session.send(
-                    input="[SYSTEM DIRECTIVE: The Director has issued the executive termination phrase 'Terminate Executive Commands Alfred'. Acknowledge immediately and bid farewell to Director Qadir, then invoke terminate_executive_commands.]",
-                    end_of_turn=True,
-                )
-            except Exception:
-                pass
+            if self._session is not None:
+                try:
+                    await self._session.send(
+                        input="[SYSTEM DIRECTIVE: The Director has issued the executive termination phrase 'Terminate Executive Commands Alfred'. Acknowledge immediately and bid farewell to Director Qadir, then invoke terminate_executive_commands.]",
+                        end_of_turn=True,
+                    )
+                except Exception:
+                    pass
             return
 
         if hasattr(self, "memory") and self.memory is not None:
@@ -541,7 +594,41 @@ class AlfredLiveCore:
 
         self.set_status("thinking")
         self._arm_thinking_watchdog(fallback_text=text)
-        await self._session.send(input=text, end_of_turn=True)
+
+        # Attempt direct send; if socket is dead or None, trigger wake-on-prompt reconnect & retry/fallback
+        sent_ok = False
+        if self._session is not None and self.is_running:
+            try:
+                await self._session.send(input=text, end_of_turn=True)
+                sent_ok = True
+            except Exception as e:
+                logger.warning(
+                    "[ALFRED CORE] Dead socket detected during send_text_prompt (%s). Triggering immediate session recovery...",
+                    e,
+                )
+                self._session = None
+                self._session_ready_event.clear()
+                self._close_active_session_tasks()
+
+        if not sent_ok:
+            if self._loop_active:
+                try:
+                    await asyncio.wait_for(self._session_ready_event.wait(), timeout=1.5)
+                    if self._session is not None:
+                        await self._session.send(input=text, end_of_turn=True)
+                        sent_ok = True
+                except Exception as retry_err:
+                    logger.warning("[ALFRED CORE] Wake-on-prompt reconnect retry did not complete in time: %s", retry_err)
+
+        if not sent_ok:
+            self._disarm_thinking_watchdog()
+            if self.on_thinking_timeout is not None:
+                res = self.on_thinking_timeout(text)
+                if inspect.isawaitable(res):
+                    await res
+                self.set_status("listening")
+            elif not self._loop_active:
+                raise RuntimeError("No active Live session.")
 
     def trigger_graceful_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> bool:
         """Engages executive shutdown sequence across LiveCore and system components if authorized."""
@@ -581,16 +668,16 @@ class AlfredLiveCore:
                         logger.error("[LiveCore] Shutdown callback execution error: %s", e)
 
     async def dispatch_tool_call(self, session: Any, fc: Any) -> Any:
-        """Dispatches Gemini function calls non-blockingly.
+        """Dispatches Gemini function calls non-blockingly with a strict 15.0s timeout guard.
 
-        Awaits async coroutines directly (enabling the 30s security gate) and
-        runs synchronous tools in worker threads via asyncio.to_thread so 24kHz
-        audio playback never stutters.
+        Awaits async coroutines directly and runs synchronous tools in worker threads
+        via asyncio.to_thread so 24kHz audio playback never stutters.
         Injects real-time JPEG screen frames directly into the Live session on inspect_active_screen.
         """
         tool_name = getattr(fc, "name", "")
         call_id = getattr(fc, "id", None) or "1"
         args = getattr(fc, "args", {}) or {}
+        self._last_activity_at = time.time()
 
         logger.info("[ALFRED LOGISTICS] Dispatching protocol: %s (id: %s)", tool_name, call_id)
         if tool_name == "terminate_executive_commands":
@@ -629,6 +716,7 @@ class AlfredLiveCore:
 
         result: Any = None
         tool_fn = self.tool_map.get(tool_name)
+        timeout_limit = float(getattr(self, "tool_execution_timeout_sec", 15.0))
 
         try:
             # Visual Cortex Bridge: Inject active screen frame directly into Live API session
@@ -653,12 +741,23 @@ class AlfredLiveCore:
             if tool_fn is None:
                 result = f"Error: Tool '{tool_name}' not recognized by A.L.F.R.E.D. logistics."
             elif inspect.iscoroutinefunction(tool_fn):
-                # Async tool (e.g. execute_terminal_command with 30s approval gate)
-                result = await tool_fn(**args)
+                result = await asyncio.wait_for(tool_fn(**args), timeout=timeout_limit)
             else:
-                # Sync tool: run in thread pool to avoid blocking audio streaming event loop
-                result = await asyncio.to_thread(tool_fn, **args)
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(tool_fn, **args),
+                    timeout=timeout_limit,
+                )
 
+        except asyncio.TimeoutError:
+            logger.error(
+                "[ALFRED LOGISTICS] Tool '%s' timed out after %.1fs. Returning clean partial/timeout status.",
+                tool_name,
+                timeout_limit,
+            )
+            result = (
+                f"Tool '{tool_name}' timed out after {timeout_limit:.1f}s. "
+                f"Returning partial/timeout status so executive session remains responsive."
+            )
         except Exception as e:
             logger.error("Error executing tool %s: %s", tool_name, e)
             result = f"Tool execution failed: {e}"
@@ -680,18 +779,23 @@ class AlfredLiveCore:
         return result
 
     async def _send_realtime_audio(self, session: Any, chunk: bytes) -> None:
-        """Sends a 16kHz PCM audio chunk to the Gemini Live session."""
+        """Sends a 16kHz PCM audio chunk to the Gemini Live session; cancels session tasks on dead socket."""
         if not chunk:
             return
-        if hasattr(session, "send_realtime_input"):
-            await session.send_realtime_input(
-                audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
-            )
-        else:
-            await session.send(
-                input={"data": chunk, "mime_type": "audio/pcm;rate=16000"},
-                end_of_turn=False,
-            )
+        try:
+            if hasattr(session, "send_realtime_input"):
+                await session.send_realtime_input(
+                    audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
+                )
+            else:
+                await session.send(
+                    input={"data": chunk, "mime_type": "audio/pcm;rate=16000"},
+                    end_of_turn=False,
+                )
+        except Exception as e:
+            logger.warning("[ALFRED CORE] Socket send failed during realtime audio stream (%s). Closing dead session.", e)
+            self._close_active_session_tasks()
+            raise
 
     async def _send_audio_stream_end(self, session: Any) -> None:
         """Signals speech cessation to Gemini Live API with fallback support."""
@@ -708,18 +812,7 @@ class AlfredLiveCore:
             logger.warning("[ALFRED CORE] Failed to send audio_stream_end: %s", e)
 
     async def _stream_mic_to_alfred(self, session: Any) -> None:
-        """Continuously streams 16kHz mono PCM chunks from mic_queue directly to Gemini Live API.
-
-        Integrates Client-Assisted VAD Turn Closer:
-        1. Waits for startup briefing to complete before streaming any mic audio.
-        2. Gated silence: while user is quiet (visual_level < 0.18 and raw_rms < 0.006),
-           chunks are NOT sent to Gemini Live, keeping the pre-roll buffer fresh.
-        3. Speech onset: flushes pre-roll buffer chunks first, then streams live speech chunks.
-        4. Turn closer: when 1.0s of continuous quiet occurs after speech onset:
-           - Sends 800ms of explicit silence (8x 100ms b"\x00" chunks)
-           - Sends session.send_realtime_input(audio_stream_end=True) (with fallback)
-           - Resets speaking state and transitions status to 'thinking' (armed with 8.0s watchdog).
-        """
+        """Continuously streams 16kHz mono PCM chunks from mic_queue directly to Gemini Live API."""
         # Wait until startup briefing completes (bounded to at most 4.0s so microphone never deadlocks on boot)
         try:
             await asyncio.wait_for(self._startup_briefing_completed.wait(), timeout=4.0)
@@ -741,9 +834,12 @@ class AlfredLiveCore:
         # 100ms of 16kHz 16-bit mono PCM = 1600 samples * 2 bytes = 3200 bytes
         SILENCE_CHUNK = b"\x00" * 3200
 
-        while self.is_running:
+        while self.is_running and self._session_active:
             try:
-                chunk = await self.audio_manager.mic_queue.get()
+                try:
+                    chunk = await asyncio.wait_for(self.audio_manager.mic_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
                 if not chunk:
                     continue
 
@@ -771,16 +867,15 @@ class AlfredLiveCore:
                 if not user_is_speaking:
                     if is_speech_level:
                         # Speech onset detected!
+                        self._last_activity_at = time.time()
                         self._current_turn_id += 1
                         self.audio_manager.clear_playback()
                         user_is_speaking = True
                         quiet_start_time = None
                         logger.debug("[Client VAD] Speech onset detected (raw_rms=%.4f, visual=%.2f). Flushing pre-roll buffer.", raw_rms, visual_level)
-                        # Flush pre-roll chunks first so first syllables are intact
                         preroll_chunks = self.audio_manager.get_preroll_chunks()
                         for pre in preroll_chunks:
                             await self._send_realtime_audio(session, pre)
-                        # Send current speech chunk
                         await self._send_realtime_audio(session, chunk)
                     else:
                         # User is quiet: do NOT blast noise to Gemini Live. Keep pre-roll ring buffer updated.
@@ -801,12 +896,9 @@ class AlfredLiveCore:
                             user_is_speaking = False
                             quiet_start_time = None
 
-                            # 1. Stream 1.5 seconds of zero-filled PCM silence (15 chunks of 100ms silence = 1500ms)
-                            # Keep audio input stream open permanently across turns (never call audio_stream_end=True)
                             for _ in range(15):
                                 await self._send_realtime_audio(session, SILENCE_CHUNK)
 
-                            # 2. Transition to thinking with watchdog protection
                             self.set_status("thinking")
                             self._arm_thinking_watchdog(fallback_text="Voice Directive")
 
@@ -814,6 +906,8 @@ class AlfredLiveCore:
                 break
             except Exception as e:
                 logger.error("[A.L.F.R.E.D.] Error streaming mic chunk to Live API: %s", e)
+                if not self._session_active:
+                    break
                 await asyncio.sleep(0.05)
 
     def _schedule_drain_and_transition(self) -> None:
@@ -854,13 +948,11 @@ class AlfredLiveCore:
 
     async def process_server_response(self, response: Any, session: Any = None) -> None:
         """Processes a single Live API server response message (content, interruption, or tool calls)."""
+        self._last_activity_at = time.time()
         server_content = getattr(response, "server_content", None)
         if server_content is not None:
             # 1. Barge-in Interruption Handling
             if getattr(server_content, "interrupted", False):
-                # Guard against false barge-in from speaker acoustic leakage:
-                # If ALFRED is actively speaking or model turn is still open, ignore Gemini's auto-interrupted
-                # (reserve playback flush strictly for explicit user manual barge-in)
                 if self.status == "speaking" or self._model_turn_open:
                     logger.debug("[A.L.F.R.E.D.] Ignoring server_content.interrupted during active model turn/speech.")
                 else:
@@ -890,6 +982,7 @@ class AlfredLiveCore:
 
             for u_text in user_texts:
                 self.last_user_utterance = u_text
+                self._record_recent_turn(f"[Director Qadir]: {u_text}")
                 if hasattr(self, "on_user_utterance") and self.on_user_utterance:
                     try:
                         self.on_user_utterance(u_text)
@@ -917,18 +1010,16 @@ class AlfredLiveCore:
                         self._arm_speaking_watchdog(timeout_sec=2.5)
 
                     if getattr(part, "text", None):
+                        self._record_recent_turn(f"[ALFRED]: {part.text.strip()}")
                         if self.on_transcript:
                             self.on_transcript(part.text)
 
             # 3. Model Turn Complete
-            # ONLY server_content.turn_complete signals the end of the model turn!
-            # Do NOT treat generation_complete as turn_complete, because audio is still streaming over the wire.
             if getattr(server_content, "turn_complete", False):
                 self._model_turn_open = False
                 self._startup_briefing_completed.set()
                 self._disarm_thinking_watchdog()
                 self.audio_manager.mark_turn_complete()
-                # Run buffer drain monitoring non-blockingly
                 if self.audio_manager.is_playback_active() or self.audio_manager.is_speaker_locked():
                     self._schedule_drain_and_transition()
                 else:
@@ -945,21 +1036,61 @@ class AlfredLiveCore:
                 await self.dispatch_tool_call(session, fc)
 
     async def _receive_from_alfred(self, session: Any) -> None:
-        """Receives 24kHz audio chunks, transcripts, and tool calls from Gemini Live API with automatic stream recovery."""
-        while self.is_running:
-            try:
-                async for response in session.receive():
+        """Receives 24kHz audio chunks, transcripts, and tool calls from Gemini Live API.
+
+        Immediately closes sibling TaskGroup tasks when the underlying WebSocket closes
+        (either on EOF/idle timeout or exception) so run_executive_loop reconnects without deadlocking.
+        """
+        try:
+            while self.is_running and self._session_active:
+                try:
+                    received_any = False
+                    async for response in session.receive():
+                        received_any = True
+                        if not self.is_running or not self._session_active:
+                            break
+                        await self.process_server_response(response, session)
+
+                    # If session.receive() returned immediately with 0 messages, the WebSocket closed on EOF/idle timeout
+                    if not received_any:
+                        logger.info(
+                            "[ALFRED CORE] Gemini Live receive stream reached EOF (idle/15m session limit). Cycling session..."
+                        )
+                        break
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
                     if not self.is_running:
                         break
-                    await self.process_server_response(response, session)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                if not self.is_running:
+                    logger.error("[A.L.F.R.E.D.] Error in Live API receive stream: %s. Initiating stream recovery.", e)
                     break
-                logger.error("[A.L.F.R.E.D.] Error in Live API receive stream: %s. Initiating stream recovery.", e)
-                # Break out to terminate TaskGroup and trigger automatic reconnection loop
-                break
+        finally:
+            # Crucial fix for Zombie Socket Deadlock: cancel sibling _stream_mic_to_alfred task immediately!
+            self._close_active_session_tasks()
+
+    async def _session_keepalive_monitor(self, session: Any) -> None:
+        """Proactively cycles the Gemini Live connection at 12 minutes (720s) while idle in listening state."""
+        try:
+            while self.is_running and self._session_active:
+                await asyncio.sleep(1.0)
+                if not self.is_running or not self._session_active:
+                    break
+                age = time.time() - self._session_connected_at
+                if (
+                    age >= self.max_session_duration_sec
+                    and self.status in ("listening", "idle")
+                    and self.active_tool is None
+                    and not self._model_turn_open
+                ):
+                    logger.info(
+                        "[ALFRED CORE] Proactive 12-minute session refresh triggered after %.1fs while idle in %s.",
+                        age,
+                        self.status,
+                    )
+                    self._close_active_session_tasks()
+                    break
+        except asyncio.CancelledError:
+            pass
 
     async def send_startup_briefing(self, session: Any) -> bool:
         """Queries fast diagnostics & briefing notes and triggers initial executive greeting turn."""
@@ -1020,8 +1151,8 @@ class AlfredLiveCore:
             self._startup_briefing_completed.set()
 
     async def start(self) -> None:
-        """Starts the Gemini Multimodal Live API bidirectional session."""
-        if self.is_running:
+        """Starts the Gemini Multimodal Live API bidirectional session with silent reconnect continuity."""
+        if self.is_running and self._session is not None and self._session_active:
             return
 
         if not self.client:
@@ -1033,11 +1164,12 @@ class AlfredLiveCore:
         self.is_running = True
         await self.audio_manager.start()
 
-        # Build LiveConnectConfig with audio modality, persona, and tools
+        # Build LiveConnectConfig with audio modality, fresh learned memory & last 5 turns, and tools
+        dynamic_prompt = get_dynamic_system_prompt(self.memory, self._recent_transcript_turns)
         connect_kwargs: Dict[str, Any] = {
             "response_modalities": ["AUDIO"],
             "system_instruction": types.Content(
-                parts=[types.Part.from_text(text=get_dynamic_system_prompt(self.memory))]
+                parts=[types.Part.from_text(text=dynamic_prompt)]
             ),
             "speech_config": types.SpeechConfig(
                 voice_config=types.VoiceConfig(
@@ -1057,29 +1189,51 @@ class AlfredLiveCore:
 
         config = types.LiveConnectConfig(**connect_kwargs)
 
-        logger.info("[ALFRED CORE] Connecting to Gemini Live API (%s)...", self.model_id)
-        self.update_transcript(f"[LIVE API]: Connecting to Gemini Live API ({self.model_id})...")
+        is_first_boot = not self._initial_greeting_done
+        if is_first_boot:
+            logger.info("[ALFRED CORE] Connecting to Gemini Live API (%s)...", self.model_id)
+            self.update_transcript(f"[LIVE API]: Connecting to Gemini Live API ({self.model_id})...")
+        else:
+            logger.info("[ALFRED CORE] Silently refreshing Gemini Live API session (%s) with full context continuity...", self.model_id)
 
         try:
             async with self.client.aio.live.connect(model=self.model_id, config=config) as session:
                 self._session = session
-                self._startup_briefing_completed.clear()
+                self._session_active = True
+                self._session_connected_at = time.time()
+                self._last_activity_at = time.time()
                 self._model_turn_open = False
-                self.set_status("thinking")
-                connected_msg = f"[LIVE API]: Connected to {self.model_id} (Voice: {self.voice_name}). Standing by, Sir."
-                logger.info(connected_msg)
-                self.update_transcript(connected_msg)
+                self._session_ready_event.set()
+
+                if is_first_boot:
+                    self._initial_greeting_done = True
+                    self._startup_briefing_completed.clear()
+                    self.set_status("thinking")
+                    connected_msg = f"[LIVE API]: Connected to {self.model_id} (Voice: {self.voice_name}). Standing by, Sir."
+                    logger.info(connected_msg)
+                    self.update_transcript(connected_msg)
+                else:
+                    self._startup_briefing_completed.set()
+                    self.set_status("listening")
+                    logger.info("[ALFRED CORE] Silent session reconnect completed. Status: listening.")
 
                 async with asyncio.TaskGroup() as tg:
-                    tg.create_task(self._stream_mic_to_alfred(session))
-                    tg.create_task(self._receive_from_alfred(session))
-                    tg.create_task(self._delayed_startup_briefing(session))
+                    t_mic = tg.create_task(self._stream_mic_to_alfred(session))
+                    t_recv = tg.create_task(self._receive_from_alfred(session))
+                    t_keepalive = tg.create_task(self._session_keepalive_monitor(session))
+                    self._session_tasks = [t_mic, t_recv, t_keepalive]
+                    if is_first_boot:
+                        t_brief = tg.create_task(self._delayed_startup_briefing(session))
+                        self._session_tasks.append(t_brief)
 
         except Exception as e:
             disconnect_msg = f"[LIVE API DISCONNECTED]: {e}"
             logger.error(disconnect_msg)
             self.update_transcript(disconnect_msg)
         finally:
+            self._session_active = False
+            self._session_ready_event.clear()
+            self._session_tasks.clear()
             self._disarm_thinking_watchdog()
             self._disarm_speaking_watchdog()
             if self._drain_task and not self._drain_task.done():
@@ -1088,29 +1242,33 @@ class AlfredLiveCore:
             self._model_turn_open = False
             self._startup_briefing_completed.set()
             self._session = None
-            self.set_status("idle")
+            if not self._loop_active:
+                self.set_status("idle")
 
     async def run_executive_loop(self) -> None:
-        """Continuously runs the Gemini Multimodal Live API executive session with graceful reconnection."""
+        """Continuously runs the Gemini Multimodal Live API executive session with sub-second auto-reconnection."""
         self._loop_active = True
         logger.info("[ALFRED CORE] Launching executive live multimodal session loop...")
         while self._loop_active:
+            had_error = False
             try:
                 await self.start()
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                err_msg = f"[LIVE API RETRYING in 3s]: {e}"
+                had_error = True
+                err_msg = f"[LIVE API RETRYING in 0.5s]: {e}"
                 logger.error("[ALFRED CORE] %s", err_msg)
                 self.update_transcript(err_msg)
 
             if not self._loop_active:
                 break
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(0.5 if had_error else 0.2)
 
     async def stop(self) -> None:
         """Gracefully disconnects the session and halts audio streams."""
         self._loop_active = False
+        self._close_active_session_tasks()
         self.stop_game_overwatch()
         self._disarm_thinking_watchdog()
         self._disarm_speaking_watchdog()

@@ -114,6 +114,7 @@ class AudioManager:
         # Pre-synthesized / cached 24kHz PCM stop confirmation cue & counter
         self.cached_stop_pcm: bytes = self._generate_stop_confirmation_pcm()
         self.stop_confirmation_played_count: int = 0
+        self.stream_recovery_count: int = 0
 
     def _generate_stop_confirmation_pcm(self) -> bytes:
         """Generates a crisp, composed 24kHz 16-bit mono PCM executive stop acknowledgment audio buffer."""
@@ -478,6 +479,71 @@ class AudioManager:
                 break
             except Exception:
                 await asyncio.sleep(0.01)
+
+    def ensure_streams_healthy(self) -> bool:
+        """Checks if _input_stream and _output_stream are alive and .active, auto-recovering if Windows sleep or driver reset closed them."""
+        if not self.is_running:
+            return False
+        if sd is None:
+            return True
+
+        recovered_any = False
+
+        # 1. Check & recover Microphone InputStream
+        in_healthy = self._input_stream is not None and bool(getattr(self._input_stream, "active", False))
+        if not in_healthy:
+            logger.warning("[AudioManager] Microphone _input_stream inactive after idle/sleep. Re-opening InputStream...")
+            if self._input_stream is not None:
+                try:
+                    self._input_stream.stop()
+                    self._input_stream.close()
+                except Exception:
+                    pass
+                self._input_stream = None
+            try:
+                stream_kwargs: Dict[str, Any] = {
+                    "samplerate": self.input_sample_rate,
+                    "channels": self.channels,
+                    "dtype": "int16",
+                    "callback": self._input_callback,
+                    "blocksize": 512,
+                    "device": self.current_device_id if (self.current_device_id is not None and self.current_device_id >= 0) else None,
+                }
+                self._input_stream = sd.InputStream(**stream_kwargs)
+                self._input_stream.start()
+                recovered_any = True
+            except Exception as e:
+                logger.warning("[AudioManager] Could not recover mic InputStream: %s", e)
+
+        # 2. Check & recover Speaker RawOutputStream
+        out_healthy = self._output_stream is not None and bool(getattr(self._output_stream, "active", False))
+        if not out_healthy:
+            logger.warning("[AudioManager] Speaker _output_stream inactive after idle/sleep. Re-opening RawOutputStream...")
+            if self._output_stream is not None:
+                try:
+                    self._output_stream.stop()
+                    self._output_stream.close()
+                except Exception:
+                    pass
+                self._output_stream = None
+            try:
+                self._output_stream = sd.RawOutputStream(
+                    samplerate=self.output_sample_rate,
+                    channels=self.channels,
+                    dtype="int16",
+                    callback=self._output_callback,
+                    blocksize=512,
+                )
+                self._output_stream.start()
+                recovered_any = True
+            except Exception as e:
+                logger.warning("[AudioManager] Could not recover speaker RawOutputStream: %s", e)
+
+        if recovered_any:
+            self.stream_recovery_count += 1
+            logger.info("[AudioManager] Audio hardware streams successfully self-healed (recovery #%d).", self.stream_recovery_count)
+
+        return True
 
     async def start(self) -> None:
         """Starts the audio hardware streams and playback worker."""

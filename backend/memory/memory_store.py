@@ -505,6 +505,16 @@ class MemoryStore:
             """)
             agenda_rows = cursor.fetchall()
 
+            # Top 5 most recently learned facts from manage_semantic_memory / remember_fact
+            cursor.execute("""
+                SELECT event, details, timestamp
+                FROM audit_log
+                WHERE event LIKE 'REMEMBER_%'
+                ORDER BY id DESC
+                LIMIT 5
+            """)
+            recent_fact_rows = cursor.fetchall()
+
         lines = [
             f"[DYNAMIC EXECUTIVE MEMORY & LEARNED PROFILE - {get_utc8_now_str()}]:",
             '• Principal: Director Qadir (pronounced "ka-dir")',
@@ -517,6 +527,12 @@ class MemoryStore:
                 lines.append(f"  - {row['pattern_description']} (Observed {row['frequency_count']}x)")
         else:
             lines.append("• Top Learned Preferences: Standing by for initial pattern extraction.")
+
+        if recent_fact_rows:
+            lines.append("• Recently Studied Knowledge & Semantic Facts (Top 5):")
+            for row in recent_fact_rows:
+                cat_label = str(row["event"]).replace("REMEMBER_", "").lower()
+                lines.append(f"  - [{cat_label} | {row['timestamp']}] {row['details'][:280]}")
 
         if workflow_rows:
             lines.append("• Recurring Operational Workflows & Typical Hours (UTC+8):")

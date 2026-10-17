@@ -115,7 +115,7 @@ class AlfredHubCoordinator:
         )
 
         # Developer Logistics Tools
-        self.dev_logistics = DevLogistics()
+        self.dev_logistics = DevLogistics(vision_manager=self.vision, memory_store=self.memory)
 
         # GUI Automation Logistics Tools
         self.gui_logistics = GuiAutomationLogistics(memory_store=self.memory)
@@ -373,11 +373,22 @@ class AlfredHubCoordinator:
                 pass
 
     async def _metrics_polling_loop(self) -> None:
-        """Polls psutil metrics and measures 8.8.8.8 TCP ping every 2.0 seconds."""
+        """Polls psutil metrics and measures 8.8.8.8 TCP ping every 2.0 seconds, and self-heals audio streams every 10 seconds."""
+        cycle_count = 0
         while self.is_running:
             try:
                 self.cached_cpu = round(psutil.cpu_percent(interval=None), 1)
                 self.cached_ram = round(psutil.virtual_memory().percent, 1)
+
+                # Every 10 seconds (5 x 2.0s cycles), verify & self-heal audio streams after Windows sleep/idle
+                cycle_count += 1
+                if cycle_count >= 5:
+                    cycle_count = 0
+                    if hasattr(self.audio, "ensure_streams_healthy"):
+                        try:
+                            self.audio.ensure_streams_healthy()
+                        except Exception as audio_err:
+                            logger.debug("Audio stream health check warning: %s", audio_err)
 
                 # Async socket ping to 8.8.8.8 (port 53)
                 start_t = time.perf_counter()
@@ -563,7 +574,7 @@ class AlfredHubCoordinator:
                 self.abort_current_operations()
                 return
 
-            if self.live_core._session and self.live_core.is_running:
+            if self.live_core._session or self.live_core.is_running or getattr(self.live_core, "_loop_active", False):
                 try:
                     logger.info("Injecting text prompt into active Live session: %s", text)
                     self.current_transcript = f"› Directive: \"{text}\""
