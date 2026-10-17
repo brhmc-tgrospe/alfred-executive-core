@@ -20,8 +20,9 @@ import webbrowser
 import json
 import urllib.parse
 import urllib.request
+import inspect
 import logging
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 import psutil
 
 from backend.memory.memory_store import MemoryStore, get_utc8_now_str
@@ -72,6 +73,13 @@ HIGH_RISK_PATTERN = re.compile(
 )
 
 
+def is_shutdown_authorized(utterance: str) -> bool:
+    """Verifies that the user explicitly authorized a full system termination."""
+    text = (utterance or "").lower().strip()
+    valid_phrases = ["terminate executive commands", "shut down alfred", "close alfred"]
+    return any(p in text for p in valid_phrases)
+
+
 class OSLogistics:
     """Executive OS Logistics tool suite with human-in-the-loop safety gate."""
 
@@ -88,7 +96,17 @@ class OSLogistics:
         self.approval_hook = approval_hook
         self.approval_timeout = approval_timeout
         self._shutdown_callback = shutdown_callback
+        self.last_user_utterance: str = ""
+        self._abort_callback: Optional[Callable[[], Any]] = None
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
+
+    def set_last_user_utterance(self, utterance: str) -> None:
+        """Tracks the latest user text or voice transcript for security gates."""
+        self.last_user_utterance = utterance
+
+    def set_abort_callback(self, cb: Callable[[], Any]) -> None:
+        """Configures callback invoked when task stop/abort is triggered."""
+        self._abort_callback = cb
 
     def set_shutdown_callback(self, cb: Callable[[str], None]) -> None:
         """Configures callback invoked when terminate_executive_commands is called."""
@@ -312,22 +330,29 @@ class OSLogistics:
             return f"Failed to launch application '{target_clean}': {e}"
 
     def inspect_active_screen(self, question: str) -> str:
-        """Captures a screenshot of the active monitor so ALFRED can analyze code, documents, or errors.
+        """Captures a screenshot of the active monitor with Set-of-Marks (#1, #2, ...) annotations and spatial coordinate grid.
 
         Args:
             question: Specific visual question or element to look for on the screen.
 
         Returns:
-            Confirmation of visual capture with resolution metadata.
+            Confirmation of visual capture with Set-of-Marks tag-to-coordinate mapping.
         """
         try:
-            jpeg_bytes = self.vision.capture_screen_jpeg()
-            mag_bytes = self.vision.capture_cursor_magnifier_jpeg()
-            w, h = self.vision.get_image_dimensions(jpeg_bytes)
-            mw, mh = self.vision.get_image_dimensions(mag_bytes)
+            annotated_bytes, som_dict = self.vision.detect_ui_elements_and_annotate_grid()
+            w, h = self.vision.get_image_dimensions(annotated_bytes)
+            tags_summary = []
+            for tag, entry in list(som_dict.items())[:20]:
+                if str(tag).startswith("#"):
+                    cx, cy = entry["center"]
+                    lbl = f" ({entry['label']})" if entry.get("label") else ""
+                    tags_summary.append(f"{tag}{lbl} at ({cx}, {cy})")
+
+            summary_str = ", ".join(tags_summary) if tags_summary else "No discrete UI tags detected"
             return (
-                f"Full screen ({w}x{h}px) and 2.0x cursor magnifier ({mw}x{mh}px) captured. "
-                f"Visual analysis targeting: '{question}'."
+                f"Full screen ({w}x{h}px) Set-of-Marks annotated grid generated with 2.0x cursor magnifier reference. "
+                f"Visual analysis targeting: '{question}'. "
+                f"Identified UI Tags: {summary_str}."
             )
         except Exception as e:
             return f"Screen inspection failed: {e}"
@@ -375,7 +400,21 @@ class OSLogistics:
         Returns:
             Confirmation statement initiating executive shutdown sequence.
         """
-        logger.info("[OS Logistics] Terminate executive commands requested: '%s'", farewell_message)
+        logger.info("[OS Logistics] Terminate executive commands requested: '%s' (last utterance: '%s')", farewell_message, self.last_user_utterance)
+        if self.last_user_utterance and not is_shutdown_authorized(self.last_user_utterance):
+            logger.warning(
+                "[SECURITY GATE] Blocked terminate_executive_commands because last utterance was '%s' (not an authorized shutdown passphrase).",
+                self.last_user_utterance
+            )
+            if self._abort_callback is not None:
+                try:
+                    res = self._abort_callback()
+                    if inspect.isawaitable(res):
+                        asyncio.create_task(res)
+                except Exception as e:
+                    logger.error("Abort callback error: %s", e)
+            return "Shutdown blocked: User requested task stop, not system termination. Stopped active task and returned to listening mode."
+
         if hasattr(self, "_shutdown_callback") and self._shutdown_callback is not None:
             try:
                 self._shutdown_callback(farewell_message)

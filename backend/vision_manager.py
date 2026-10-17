@@ -448,3 +448,156 @@ class VisionManager:
         # Encode to JPEG buffer at quality 88
         _, enc = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 88])
         return enc.tobytes(), som_dict
+
+    def autonomous_screen_search(self, target_query: str, window_title: str = "active") -> Dict[str, Any]:
+        """Autonomously searches the full screen/window for a target UI element, button, or spatial region.
+
+        1. Checks current Set-of-Marks cache for tag, label, or spatial keyword match.
+        2. If not found in cache, refreshes detect_ui_elements_and_annotate_grid(window_title) across the entire screen.
+        3. Performs multi-scale lookup:
+           - Direct tag match (#N or N).
+           - Element label match (e.g. 'submit', 'save', 'file').
+           - Spatial region keywords (e.g. 'top right', 'taskbar', 'close button', 'center').
+           - Win32 child window titles.
+
+        Args:
+            target_query: The name, label, tag, or spatial description of the element to find.
+            window_title: Window title or 'active' for foreground window.
+
+        Returns:
+            Dict containing {"found": bool, "center": (x, y), "tag": str, "label": str, ...}
+        """
+        q = (target_query or "").strip().lower()
+        if not q:
+            return {"found": False, "center": (-1, -1), "tag": "", "label": "", "reason": "Empty target query."}
+
+        def _search_in_cache(c: dict) -> Optional[Dict[str, Any]]:
+            if not c:
+                return None
+
+            # 1. Direct Tag Match (#1, 1, #12, etc.)
+            tag_key = q if q.startswith("#") else f"#{q}"
+            if tag_key in c:
+                entry = c[tag_key]
+                return {
+                    "found": True,
+                    "center": entry.get("center", (-1, -1)),
+                    "tag": entry.get("tag", tag_key),
+                    "label": entry.get("label", ""),
+                    "rect": entry.get("rect", (0, 0, 0, 0)),
+                }
+            if q in c:
+                entry = c[q]
+                return {
+                    "found": True,
+                    "center": entry.get("center", (-1, -1)),
+                    "tag": entry.get("tag", ""),
+                    "label": entry.get("label", ""),
+                    "rect": entry.get("rect", (0, 0, 0, 0)),
+                }
+
+            # 2. Label Substring Match across detected elements
+            for k, entry in c.items():
+                if not isinstance(entry, dict):
+                    continue
+                lbl = entry.get("label", "").lower()
+                if lbl and (q in lbl or lbl in q):
+                    return {
+                        "found": True,
+                        "center": entry.get("center", (-1, -1)),
+                        "tag": entry.get("tag", k),
+                        "label": entry.get("label", ""),
+                        "rect": entry.get("rect", (0, 0, 0, 0)),
+                    }
+
+            # 3. Spatial Keyword Region Matching
+            w, h = 1920, 1080
+            if c:
+                max_x = max((e.get("center", (0, 0))[0] for e in c.values() if isinstance(e, dict)), default=1920)
+                max_y = max((e.get("center", (0, 0))[1] for e in c.values() if isinstance(e, dict)), default=1080)
+                w = max(1920, max_x + 50)
+                h = max(1080, max_y + 50)
+
+            spatial_box = None
+            if "close" in q or "exit button" in q:
+                spatial_box = (int(w * 0.85), 0, w, int(h * 0.10))
+            elif "top right" in q:
+                spatial_box = (int(w * 0.66), 0, w, int(h * 0.33))
+            elif "top left" in q:
+                spatial_box = (0, 0, int(w * 0.33), int(h * 0.33))
+            elif "top center" in q or "top middle" in q:
+                spatial_box = (int(w * 0.33), 0, int(w * 0.66), int(h * 0.33))
+            elif "bottom right" in q:
+                spatial_box = (int(w * 0.66), int(h * 0.66), w, h)
+            elif "bottom left" in q:
+                spatial_box = (0, int(h * 0.66), int(w * 0.33), h)
+            elif "taskbar" in q or "bottom bar" in q or "start" in q:
+                spatial_box = (0, int(h * 0.88), w, h)
+            elif "center" in q or "middle" in q:
+                spatial_box = (int(w * 0.33), int(h * 0.33), int(w * 0.66), int(h * 0.66))
+
+            if spatial_box:
+                sx1, sy1, sx2, sy2 = spatial_box
+                matching_candidates = []
+                for k, entry in c.items():
+                    if not isinstance(entry, dict) or not str(k).startswith("#"):
+                        continue
+                    cx, cy = entry.get("center", (-1, -1))
+                    if sx1 <= cx <= sx2 and sy1 <= cy <= sy2:
+                        matching_candidates.append(entry)
+
+                if matching_candidates:
+                    if "close" in q:
+                        matching_candidates.sort(key=lambda e: (e["center"][0] - e["center"][1]), reverse=True)
+                    elif "taskbar" in q or "start" in q:
+                        matching_candidates.sort(key=lambda e: e["center"][1], reverse=True)
+                    else:
+                        target_cx = (sx1 + sx2) / 2
+                        target_cy = (sy1 + sy2) / 2
+                        matching_candidates.sort(key=lambda e: (e["center"][0] - target_cx)**2 + (e["center"][1] - target_cy)**2)
+
+                    best = matching_candidates[0]
+                    return {
+                        "found": True,
+                        "center": best.get("center", (-1, -1)),
+                        "tag": best.get("tag", ""),
+                        "label": best.get("label", ""),
+                        "rect": best.get("rect", (0, 0, 0, 0)),
+                    }
+
+                scx = (sx1 + sx2) // 2
+                scy = (sy1 + sy2) // 2
+                return {
+                    "found": True,
+                    "center": (scx, scy),
+                    "tag": "",
+                    "label": f"Spatial region '{q}' center",
+                    "rect": (sx1, sy1, sx2 - sx1, sy2 - sy1),
+                }
+
+            return None
+
+        # 1. Search existing cache first
+        cache = self.get_som_cache()
+        cached_result = _search_in_cache(cache)
+        if cached_result is not None:
+            return cached_result
+
+        # 2. If not found in cache, refresh full-screen Set-of-Marks detection
+        try:
+            _, refreshed = self.detect_ui_elements_and_annotate_grid(window_title=window_title)
+            if refreshed:
+                fresh_result = _search_in_cache(refreshed)
+                if fresh_result is not None:
+                    return fresh_result
+        except Exception as e:
+            logger.debug("[Autonomous Screen Search] Screen detection refresh exception: %s", e)
+
+        return {
+            "found": False,
+            "center": (-1, -1),
+            "tag": "",
+            "label": "",
+            "reason": f"No matching element or spatial region found for '{target_query}'.",
+        }
+

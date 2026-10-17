@@ -52,7 +52,7 @@ from backend.tools.gui_automation import GuiAutomationLogistics
 from backend.tools.browser_automation import BrowserAutomationLogistics
 from backend.tools.game_interaction import GameInteractionLogistics
 from backend.tools.meeting_biometrics import MeetingBiometricsLogistics, get_utc8_timestamp
-from backend.live_session import AlfredLiveCore
+from backend.live_session import AlfredLiveCore, is_shutdown_authorized, is_stop_command
 
 load_dotenv()
 logger = logging.getLogger("AlfredMain")
@@ -178,9 +178,16 @@ class AlfredHubCoordinator:
             on_thinking_timeout=self._execute_fallback_prompt,
         )
 
-        # Connect graceful shutdown hooks
-        self.logistics.set_shutdown_callback(self.schedule_shutdown)
-        self.live_core.set_shutdown_callback(self.schedule_shutdown)
+        # Track last user utterance across coordinator and logistics
+        self.last_user_utterance: str = ""
+        self.os_logistics = self.logistics
+
+        # Connect graceful shutdown and abort hooks
+        self.logistics.set_abort_callback(self.abort_current_operations)
+        self.logistics.set_shutdown_callback(self.trigger_graceful_shutdown)
+        self.live_core.set_shutdown_callback(self.trigger_graceful_shutdown)
+        self.live_core.on_abort_operations = self.broadcast_state_packet
+        self.live_core.on_user_utterance = self.on_user_utterance
 
         # Direct aliases for clear architectural access
         self.audio_manager = self.audio
@@ -266,13 +273,41 @@ class AlfredHubCoordinator:
             async with self._lock:
                 self.connected_clients.difference_update(disconnected)
 
-    def trigger_graceful_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> None:
+    def on_user_utterance(self, text: str) -> None:
+        """Tracks latest user utterance across coordinator, live core, and os logistics."""
+        self.last_user_utterance = text
+        self.live_core.last_user_utterance = text
+        self.logistics.set_last_user_utterance(text)
+
+    def abort_current_operations(self) -> str:
+        """Instantly halts audio playback, background overwatch, and returns HUD to listening state."""
+        logger.info("[COORDINATOR] Aborting active operations on Director command.")
+        self.audio.clear_playback()
+        ack = self.live_core.abort_current_operations()
+        self.current_transcript = f"{get_utc8_timestamp(full=False)} {ack}"
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.broadcast_state_packet())
+        except RuntimeError:
+            pass
+        return ack
+
+    def trigger_graceful_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> bool:
         """Shared graceful shutdown trigger wired across live_core, logistics, and coordinator."""
+        if self.last_user_utterance and not is_shutdown_authorized(self.last_user_utterance):
+            logger.warning("[COORDINATOR] Blocked trigger_graceful_shutdown: last utterance '%s' is not authorized", self.last_user_utterance)
+            self.abort_current_operations()
+            return False
         self.schedule_shutdown(farewell_message)
+        return True
 
     def schedule_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> None:
         """Schedules non-blocking graceful executive shutdown sequence."""
-        asyncio.create_task(self.execute_system_shutdown(farewell_message))
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.execute_system_shutdown(farewell_message))
+        except RuntimeError:
+            pass
 
     async def execute_system_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> None:
         """Broadcasts system_shutdown to Electron HUD and exits Python process cleanly after audio playback drains."""
@@ -502,13 +537,20 @@ class AlfredHubCoordinator:
             if not text:
                 return
 
-            if "terminate executive commands alfred" in text.lower():
+            self.on_user_utterance(text)
+
+            if is_shutdown_authorized(text):
                 logger.warning("Directive 'terminate executive commands alfred' received via text_prompt!")
                 farewell = "Terminating all executive commands now, Director Qadir. Standing down, Sir."
                 self.current_transcript = farewell
                 self.live_core.set_status("speaking")
                 await self.broadcast_state_packet()
                 self.schedule_shutdown(farewell)
+                return
+
+            if is_stop_command(text):
+                logger.info("Operational stop command received via text_prompt: '%s'", text)
+                self.abort_current_operations()
                 return
 
             if self.live_core._session and self.live_core.is_running:
@@ -528,17 +570,12 @@ class AlfredHubCoordinator:
             logger.info("Manual inspect screen triggered from HUD.")
             if self.live_core._session and self.live_core.is_running:
                 try:
-                    jpeg_bytes = self.vision.capture_screen_jpeg()
-                    mag_bytes = self.vision.capture_cursor_magnifier_jpeg()
+                    annotated_bytes, _ = self.vision.detect_ui_elements_and_annotate_grid()
                     await self.live_core._session.send(
-                        input={"data": jpeg_bytes, "mime_type": "image/jpeg"},
+                        input={"data": annotated_bytes, "mime_type": "image/jpeg"},
                         end_of_turn=False,
                     )
-                    await self.live_core._session.send(
-                        input={"data": mag_bytes, "mime_type": "image/jpeg"},
-                        end_of_turn=False,
-                    )
-                    logger.info("Injected full screen and 2.0x cursor magnifier frames to Live session.")
+                    logger.info("Injected Set-of-Marks annotated full-screen frame to Live session.")
                 except Exception as e:
                     logger.warning("Failed to stream screen to Live session: %s", e)
             else:

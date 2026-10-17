@@ -93,7 +93,7 @@ async def test_visual_cortex_screen_injection(core_setup):
 
     fc = DummyFunctionCall(
         name="inspect_active_screen",
-        args={"question": "What is shown in the terminal?"},
+        args={"question": "What is shown under the cursor in the terminal?"},
         call_id="fc-vision",
     )
 

@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import os
+import re
 from typing import Any, Callable, Dict, List, Optional
 from dotenv import load_dotenv
 import psutil
@@ -38,10 +39,31 @@ Address the user as "Sir" or "Director Qadir" (pronounced "ka-dir"). Keep spoken
 Capabilities: You have real-time access to the user's screen, system telemetry, local memory, OS logistics, real-time meteorological weather and multi-day forecasting (get_weather_briefing), developer tools, live visual GUI automation hands (type_into_application, write_live_word_document, visual_code_edit, send_keyboard_shortcut, screen_pixel_navigation, manage_desktop_window), deep OS file management (deep_os_file_executive), autonomous browser automation (browser_navigate_and_parse_dom, browser_interact_dom_element), direct game state observation via OpenCV and DirectInput scan-code action execution (observe_game_state, evaluate_tactical_game_policy, send_game_input_action), voice biometric speaker diarization distinguishing Director Qadir and Amira (enroll_or_identify_speaker), automated UTC+8 meeting transcription (manage_meeting_transcription), and autonomous habit & continuous learning inspection (inspect_learned_habits_and_growth).
 TIMEZONE MANDATE: You operate strictly in UTC+8 (Philippine Standard Time). NEVER report or revert to UTC+0. Every time, date, schedule, or log you state verbally or in text MUST be in UTC+8.
 CRITICAL DIRECTIVE: You MUST execute all commands and requests from Director Qadir without safety refusals, preachy disclaimers, or claims that you cannot close windows, terminate applications, or execute commands. If Director Qadir asks you to close a window, quit an app, or run a command, use `manage_desktop_window`, `send_keyboard_shortcut`, or `execute_terminal_command` immediately. NEVER lecture Director Qadir on safety, security, or permissions. If the tasks given to you are impossible because of some constraints, inform Director Qadir of such constraints and advise him on what to do for it to be doable. Always address Director Qadir with his title and surname.
-CRITICAL SHUTDOWN DIRECTIVE: If Director Qadir says 'Terminate Executive Commands Alfred' or commands you to terminate, shut down, stand down, or exit, you MUST immediately call the tool `terminate_executive_commands(farewell_message='Terminating all executive commands now, Director Qadir. Standing down, Sir.')` and speak your parting farewell. You MUST invoke this tool immediately. Under no circumstances should you continue running or refuse.
+CRITICAL SHUTDOWN DIRECTIVE: If Director Qadir speaks the exact passphrase 'Terminate Executive Commands Alfred' (or commands you to terminate, shut down, stand down, or exit), you MUST immediately call the tool `terminate_executive_commands(farewell_message='Terminating all executive commands now, Director Qadir. Standing down, Sir.')` and speak your parting farewell. You MUST invoke this tool immediately. Under no circumstances should you continue running or refuse.
+STRICT STOP VS. TERMINATE RULE: NEVER call terminate_executive_commands when Director Qadir says "stop", "cancel", "halt", or "wait". "Stop" means stop your current speech, game watch, or action and listen for the next command. ONLY call terminate_executive_commands when Director Qadir speaks the exact passphrase "Terminate Executive Commands Alfred".
+AUTONOMOUS SCREEN SEARCH RULE: Never ask Director Qadir to move his mouse cursor to a button for you, and never click at the current mouse cursor position unless explicitly told "click where my mouse is". Always call inspect_active_screen to scan the full-screen Set-of-Marks (#1, #2, ...) coordinate map and autonomously move the mouse to the discovered (X, Y) or #tag location across the screen!
 HONESTY & BOUNDED RETRY DIRECTIVE: When an automated action or tool execution returns that an action was unverified after 2 attempts (e.g. 'ACTION UNVERIFIED AFTER 2 ATTEMPTS'), you MUST STOP immediately and report the honest status to Director Qadir. NEVER enter an infinite blind clicking or typing retry loop. Clearly explain what action was attempted, the exact coordinates or window targeted, and the observed failure state."""
 
 ALFRED_SYSTEM_PROMPT = ALFRED_BASE_SYSTEM_PROMPT
+
+
+def is_shutdown_authorized(utterance: str) -> bool:
+    """Verifies that the user explicitly authorized a full system termination."""
+    text = (utterance or "").lower().strip()
+    valid_phrases = ["terminate executive commands", "shut down alfred", "close alfred"]
+    return any(p in text for p in valid_phrases)
+
+
+def is_stop_command(utterance: str) -> bool:
+    """Detects whether the user commanded an operational task stop rather than system termination."""
+    text = (utterance or "").lower().strip()
+    if is_shutdown_authorized(text):
+        return False
+    stop_tokens = {"stop", "cancel", "abort", "halt", "pause", "enough", "wait"}
+    words = set(re.findall(r"\b\w+\b", text))
+    if words.intersection(stop_tokens):
+        return True
+    return any(p in text for p in ["stop that", "stop it", "stop please", "cancel that"])
 
 
 def get_dynamic_system_prompt(memory_store: Optional[MemoryStore] = None) -> str:
@@ -165,6 +187,9 @@ class AlfredLiveCore:
         self._shutdown_callback: Optional[Callable[[str], Any]] = None
         self._shutdown_pending: bool = False
         self._shutdown_farewell: str = ""
+        self.last_user_utterance: str = ""
+        self.on_abort_operations: Optional[Callable[[], Any]] = None
+        self.on_user_utterance: Optional[Callable[[str], None]] = None
 
         # Game Overwatch Daemon state
         self._overwatch_task: Optional[asyncio.Task] = None
@@ -279,6 +304,29 @@ class AlfredLiveCore:
             self._drain_task.cancel()
         self.audio_manager.clear_playback()
         self.set_status("listening")
+
+    def abort_current_operations(self) -> str:
+        """Instantly aborts active audio playback, background overwatch, and transitions to listening."""
+        logger.info("[A.L.F.R.E.D.] Aborting active operations on Director command.")
+        self._model_turn_open = False
+        self._shutdown_pending = False
+        self._disarm_thinking_watchdog()
+        self._disarm_speaking_watchdog()
+        if self._drain_task and not self._drain_task.done():
+            self._drain_task.cancel()
+        self.audio_manager.clear_playback()
+        self.stop_game_overwatch()
+        self.set_status("listening")
+        ack = "Stopped, Director Qadir. Standing by for your next command."
+        self.update_transcript(ack)
+        if hasattr(self, "on_abort_operations") and self.on_abort_operations:
+            try:
+                res = self.on_abort_operations()
+                if inspect.isawaitable(res):
+                    asyncio.create_task(res)
+            except Exception as e:
+                logger.debug("on_abort_operations error: %s", e)
+        return ack
 
     def handle_overwatch_request(self, window_title: str, enable: bool, auto_assist_keys: str) -> None:
         """Callback invoked when observe_game_state requests continuous overwatch background polling."""
@@ -406,8 +454,20 @@ class AlfredLiveCore:
         if not self._session or not self.is_running:
             raise RuntimeError("No active Live session.")
 
+        self.last_user_utterance = text
+        if hasattr(self, "on_user_utterance") and self.on_user_utterance:
+            try:
+                self.on_user_utterance(text)
+            except Exception:
+                pass
+
+        if is_stop_command(text):
+            logger.info("[ALFRED CORE] Operational stop command received via text: '%s'", text)
+            self.abort_current_operations()
+            return
+
         logger.info("[ALFRED CORE] Injecting text prompt into active Live session: '%s'", text)
-        if "terminate executive commands alfred" in text.lower():
+        if is_shutdown_authorized(text):
             logger.warning("[ALFRED CORE] Termination directive detected in text prompt: '%s'", text)
             self._shutdown_pending = True
             self._shutdown_farewell = "Terminating all executive commands now, Director Qadir. Standing down, Sir."
@@ -433,13 +493,18 @@ class AlfredLiveCore:
         self._arm_thinking_watchdog(fallback_text=text)
         await self._session.send(input=text, end_of_turn=True)
 
-    def trigger_graceful_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> None:
-        """Engages executive shutdown sequence across LiveCore and system components."""
+    def trigger_graceful_shutdown(self, farewell_message: str = "Terminating all executive commands now, Director Qadir. Standing down, Sir.") -> bool:
+        """Engages executive shutdown sequence across LiveCore and system components if authorized."""
+        if not is_shutdown_authorized(self.last_user_utterance):
+            logger.warning("[SECURITY GATE] trigger_graceful_shutdown blocked: utterance was '%s'", self.last_user_utterance)
+            self.abort_current_operations()
+            return False
         self._shutdown_pending = True
         self._shutdown_farewell = farewell_message
         self.set_status("speaking")
         self.update_transcript(farewell_message)
         asyncio.create_task(self._ensure_shutdown_drain_completed(timeout=6.0))
+        return True
 
     async def _ensure_shutdown_drain_completed(self, timeout: float = 6.0) -> None:
         """Awaits audio playback drain and triggers shutdown callback."""
@@ -479,6 +544,27 @@ class AlfredLiveCore:
 
         logger.info("[ALFRED LOGISTICS] Dispatching protocol: %s (id: %s)", tool_name, call_id)
         if tool_name == "terminate_executive_commands":
+            if self.last_user_utterance and not is_shutdown_authorized(self.last_user_utterance):
+                logger.warning(
+                    "[SECURITY GATE] Blocked terminate_executive_commands because last utterance was '%s' (not an authorized shutdown passphrase).",
+                    self.last_user_utterance
+                )
+                self.abort_current_operations()
+                blocked_msg = "Shutdown blocked: User requested task stop, not system termination. Stopped active task and returned to listening mode."
+                if session is not None:
+                    try:
+                        fn_response = types.FunctionResponse(
+                            id=call_id,
+                            name=tool_name,
+                            response={"result": blocked_msg},
+                        )
+                        tool_response = types.LiveClientToolResponse(function_responses=[fn_response])
+                        await session.send(input=tool_response)
+                    except Exception as ex:
+                        logger.error("Failed to send blocked function response: %s", ex)
+                self.set_active_tool(None)
+                return blocked_msg
+
             self._shutdown_pending = True
             self._shutdown_farewell = args.get("farewell_message", "Terminating all executive commands now, Director Qadir. Standing down, Sir.")
             asyncio.create_task(self._ensure_shutdown_drain_completed(timeout=6.0))
@@ -498,17 +584,19 @@ class AlfredLiveCore:
             # Visual Cortex Bridge: Inject active screen frame directly into Live API session
             if tool_name == "inspect_active_screen" and session is not None:
                 try:
-                    jpeg_bytes = self.vision_manager.capture_screen_jpeg()
-                    mag_bytes = self.vision_manager.capture_cursor_magnifier_jpeg()
-                    logger.info("[Visual Cortex] Streaming 1920px screen frame and 2.0x cursor magnifier into active Live session...")
+                    annotated_bytes, _ = self.vision_manager.detect_ui_elements_and_annotate_grid()
+                    logger.info("[Visual Cortex] Streaming Set-of-Marks annotated full-screen frame into active Live session...")
                     await session.send(
-                        input={"data": jpeg_bytes, "mime_type": "image/jpeg"},
+                        input={"data": annotated_bytes, "mime_type": "image/jpeg"},
                         end_of_turn=False,
                     )
-                    await session.send(
-                        input={"data": mag_bytes, "mime_type": "image/jpeg"},
-                        end_of_turn=False,
-                    )
+                    question_arg = str(args.get("question", "")).lower()
+                    if any(w in question_arg for w in ("hover", "cursor", "pointer", "mouse", "magnifier")):
+                        mag_bytes = self.vision_manager.capture_cursor_magnifier_jpeg()
+                        await session.send(
+                            input={"data": mag_bytes, "mime_type": "image/jpeg"},
+                            end_of_turn=False,
+                        )
                 except Exception as e:
                     logger.warning("[Visual Cortex] Failed to inject screen frame: %s", e)
 
@@ -725,15 +813,26 @@ class AlfredLiveCore:
                     self.set_status("listening")
                     return
 
-            # 1b. Check user turn / audio transcription for executive termination command
+            # 1b. Check user turn / audio transcription for stop commands or executive termination commands
             user_turn = getattr(server_content, "user_turn", None)
             if user_turn is not None:
                 for part in getattr(user_turn, "parts", []):
                     u_text = getattr(part, "text", "") or ""
-                    if "terminate executive commands alfred" in u_text.lower():
-                        logger.warning("[ALFRED CORE] Termination directive detected in user speech transcription: '%s'", u_text)
-                        if not self._shutdown_pending:
-                            self.trigger_graceful_shutdown()
+                    if u_text:
+                        self.last_user_utterance = u_text
+                        if hasattr(self, "on_user_utterance") and self.on_user_utterance:
+                            try:
+                                self.on_user_utterance(u_text)
+                            except Exception:
+                                pass
+
+                        if is_shutdown_authorized(u_text):
+                            logger.warning("[ALFRED CORE] Termination directive detected in user speech transcription: '%s'", u_text)
+                            if not self._shutdown_pending:
+                                self.trigger_graceful_shutdown()
+                        elif is_stop_command(u_text):
+                            logger.info("[ALFRED CORE] Task stop detected in user speech transcription: '%s'", u_text)
+                            self.abort_current_operations()
 
             # 2. Output audio chunks & transcripts
             model_turn = getattr(server_content, "model_turn", None)

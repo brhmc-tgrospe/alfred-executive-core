@@ -576,29 +576,31 @@ class GuiAutomationLogistics:
         if pyautogui is None:
             return "Error: pyautogui is unavailable on this host."
 
-        # 1. Resolve Set-of-Marks Tag or Label if provided
-        if target_label_or_tag:
-            tag_clean = target_label_or_tag.strip().lower()
-            cache = self.vision.get_som_cache()
-            if tag_clean not in cache and f"#{tag_clean}" not in cache:
-                try:
-                    self.vision.detect_ui_elements_and_annotate_grid()
-                    cache = self.vision.get_som_cache()
-                except Exception as ex:
-                    logger.warning("SoM grid detection failed: %s", ex)
-
-            entry = cache.get(tag_clean) or cache.get(f"#{tag_clean}")
-            if entry and "center" in entry:
-                cx, cy = entry["center"]
-                x, y = int(cx), int(cy)
-                logger.info("[Pixel Navigation] Resolved '%s' to center coordinates (%d, %d)", target_label_or_tag, x, y)
-            else:
-                if x == -1 and y == -1:
+        # 1. Resolve coordinates if x or y is negative
+        if x < 0 or y < 0:
+            target_clean = target_label_or_tag.strip().lower() if target_label_or_tag else ""
+            wants_cursor = target_clean in ("cursor", "mouse", "where my mouse is", "mouse cursor")
+            if wants_cursor:
+                x, y = get_live_cursor_coords()
+                logger.info("[Pixel Navigation] Explicit cursor targeting requested: using current mouse position (%d, %d)", x, y)
+            elif target_label_or_tag:
+                # Autonomously search the full screen for target tag, label, or spatial region
+                search_res = self.vision.autonomous_screen_search(target_label_or_tag)
+                if (
+                    isinstance(search_res, dict)
+                    and search_res.get("found") is True
+                    and isinstance(search_res.get("center"), (list, tuple))
+                    and len(search_res["center"]) == 2
+                ):
+                    cx, cy = search_res["center"]
+                    x, y = int(cx), int(cy)
+                    logger.info("[Pixel Navigation] Autonomously resolved '%s' to center coordinates (%d, %d)", target_label_or_tag, x, y)
+                else:
                     return f"Error: Could not resolve Set-of-Marks tag or label '{target_label_or_tag}' on active screen."
 
-        # 2. Support live cursor auto-targeting when coordinates are (-1, -1) or user says 'click where my mouse is'
+        # 2. Reject lazy (-1, -1) default unless cursor was explicitly requested
         if x == -1 and y == -1:
-            x, y = get_live_cursor_coords()
+            return "Error: Must provide either screen coordinates (x, y), a target tag/label, or specify target_label_or_tag='cursor' to click at the current mouse position."
 
         act = action.strip().lower()
         try:
