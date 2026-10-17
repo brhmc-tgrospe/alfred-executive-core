@@ -584,7 +584,7 @@ class GuiAutomationLogistics:
 
         act = action.strip().lower()
 
-        # Visual Learning Action: Capture clean un-occluded template & hover-state delta
+        # Visual Learning Action: Capture clean un-occluded adaptive templates, inner core & hover-state delta
         if act in ("learn_element", "learn"):
             if x < 0 or y < 0:
                 cx, cy = get_live_cursor_coords()
@@ -595,9 +595,10 @@ class GuiAutomationLogistics:
             elem_name = target_label_or_tag.strip() or f"element_{int(time.time())}"
             slug = re.sub(r"[^a-z0-9_-]+", "_", elem_name.lower()).strip("_") or f"elem_{int(time.time())}"
 
-            tpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "memory", "visual_templates")
+            tpl_dir = self._get_visual_templates_dir()
             os.makedirs(tpl_dir, exist_ok=True)
             tpl_path = os.path.abspath(os.path.join(tpl_dir, f"{slug}.png"))
+            core_path = os.path.abspath(os.path.join(tpl_dir, f"{slug}_core.png"))
             hover_path = os.path.abspath(os.path.join(tpl_dir, f"{slug}_hover.png"))
 
             # 1. Temporarily nudge OS cursor (cx + 120, cy + 120) for 60ms to eliminate cursor occlusion
@@ -608,10 +609,20 @@ class GuiAutomationLogistics:
                     pass
             time.sleep(0.06)
 
-            # Capture clean 44x44 patch of the un-occluded icon
+            # Capture clean 44x44 patch for hover comparison & extract adaptive auto-bounded templates
             clean_patch = self.vision.capture_screen_patch(cx, cy, patch_size=44)
-            if clean_patch is not None and clean_patch.size > 0:
-                cv2.imwrite(tpl_path, clean_patch)
+            adaptive = self.vision._extract_adaptive_icon_templates(cx, cy, fallback_patch=clean_patch)
+            full_tpl = adaptive.get("full_template", clean_patch)
+            core_tpl = adaptive.get("core_template", clean_patch)
+            detected_w = int(adaptive.get("width", 44))
+            detected_h = int(adaptive.get("height", 44))
+            orb_features = adaptive.get("orb_features", "[]")
+            hsv_hist = adaptive.get("hsv_hist", "[]")
+
+            if full_tpl is not None and full_tpl.size > 0:
+                cv2.imwrite(tpl_path, full_tpl)
+            if core_tpl is not None and core_tpl.size > 0:
+                cv2.imwrite(core_path, core_tpl)
 
             # 2. Move cursor back onto (cx, cy) for 300ms (hover state)
             if pyautogui is not None:
@@ -638,14 +649,17 @@ class GuiAutomationLogistics:
 
             hover_desc = f"Hover state visual shift: {hover_pct:.1f}% pixel variance (border/tooltip delta)"
 
-            # Save learned visual memory
+            # Save learned visual memory with adaptive bounds, inner core, ORB features, and HSV histogram
             if hasattr(self, "memory") and self.memory is not None and hasattr(self.memory, "save_visual_ui_memory"):
                 self.memory.save_visual_ui_memory(
                     element_key=elem_name,
                     template_png_path=tpl_path,
+                    core_png_path=core_path,
                     hover_template_png_path=hover_path,
-                    width=44,
-                    height=44,
+                    width=detected_w,
+                    height=detected_h,
+                    orb_features=orb_features,
+                    hsv_hist=hsv_hist,
                     aliases=[elem_name.lower(), slug.replace("_", " ")],
                     hover_behavior_desc=hover_desc,
                     last_seen_x=cx,
@@ -654,8 +668,8 @@ class GuiAutomationLogistics:
 
             return (
                 f"Visual element '{elem_name}' successfully learned at ({cx}, {cy}). "
-                f"Clean 44x44 template and hover state saved to visual memory ({hover_desc}). "
-                f"Future actions targeting '{elem_name}' will locate this element anywhere on screen via multi-scale template matching."
+                f"Auto-bounded {detected_w}x{detected_h} template, tight inner core, and hover state saved to visual memory ({hover_desc}). "
+                f"Future actions targeting '{elem_name}' will locate this element anywhere on screen via multi-scale template & HSV/ORB matching."
             )
 
         # 1. Resolve coordinates if x or y is negative
@@ -931,8 +945,16 @@ class GuiAutomationLogistics:
             logger.error("Error managing desktop window '%s': %s", matched_title, e)
             return f"Error executing '{action}' on window '{matched_title}': {e}"
 
+    def _get_visual_templates_dir(self) -> str:
+        """Resolves the directory for storing learned visual templates (isolated for test DBs)."""
+        if hasattr(self, "memory") and self.memory is not None and getattr(self.memory, "db_path", ""):
+            db_path_str = str(self.memory.db_path)
+            if "alfred_memory.db" not in os.path.basename(db_path_str):
+                return os.path.join(os.path.dirname(os.path.abspath(db_path_str)), "visual_templates")
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "memory", "visual_templates")
+
     def _auto_learn_on_click(self, x: int, y: int, target_label_or_tag: str, pre_patch: np.ndarray) -> None:
-        """Autonomously snapshots and persists template on confirmed click."""
+        """Autonomously snapshots and persists adaptive template on confirmed click."""
         if not target_label_or_tag or not hasattr(self, "memory") or self.memory is None:
             return
         clean_tag = target_label_or_tag.strip().lower()
@@ -940,17 +962,31 @@ class GuiAutomationLogistics:
             return
         try:
             slug = re.sub(r"[^a-z0-9_-]+", "_", clean_tag).strip("_")
-            tpl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "memory", "visual_templates")
+            tpl_dir = self._get_visual_templates_dir()
             os.makedirs(tpl_dir, exist_ok=True)
             tpl_path = os.path.abspath(os.path.join(tpl_dir, f"{slug}.png"))
+            core_path = os.path.abspath(os.path.join(tpl_dir, f"{slug}_core.png"))
             if not os.path.exists(tpl_path) and pre_patch is not None and pre_patch.size > 0:
-                cv2.imwrite(tpl_path, pre_patch)
+                adaptive = self.vision._extract_adaptive_icon_templates(x, y, fallback_patch=pre_patch)
+                full_tpl = adaptive.get("full_template", pre_patch)
+                core_tpl = adaptive.get("core_template", pre_patch)
+                detected_w = int(adaptive.get("width", pre_patch.shape[1]))
+                detected_h = int(adaptive.get("height", pre_patch.shape[0]))
+                orb_features = adaptive.get("orb_features", "[]")
+                hsv_hist = adaptive.get("hsv_hist", "[]")
+
+                cv2.imwrite(tpl_path, full_tpl)
+                if core_tpl is not None and core_tpl.size > 0:
+                    cv2.imwrite(core_path, core_tpl)
                 if hasattr(self.memory, "save_visual_ui_memory"):
                     self.memory.save_visual_ui_memory(
                         element_key=target_label_or_tag.strip(),
                         template_png_path=tpl_path,
-                        width=pre_patch.shape[1],
-                        height=pre_patch.shape[0],
+                        core_png_path=core_path,
+                        width=detected_w,
+                        height=detected_h,
+                        orb_features=orb_features,
+                        hsv_hist=hsv_hist,
                         aliases=[clean_tag],
                         hover_behavior_desc="Auto-captured on verified click",
                         last_seen_x=x,

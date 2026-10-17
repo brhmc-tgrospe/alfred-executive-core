@@ -111,6 +111,30 @@ class AudioManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._feeder_task: Optional[asyncio.Task] = None
 
+        # Pre-synthesized / cached 24kHz PCM stop confirmation cue & counter
+        self.cached_stop_pcm: bytes = self._generate_stop_confirmation_pcm()
+        self.stop_confirmation_played_count: int = 0
+
+    def _generate_stop_confirmation_pcm(self) -> bytes:
+        """Generates a crisp, composed 24kHz 16-bit mono PCM executive stop acknowledgment audio buffer."""
+        sr = self.output_sample_rate
+        duration = 0.24  # 240ms two-tone descending executive chime cue
+        t = np.linspace(0.0, duration, int(sr * duration), endpoint=False, dtype=np.float32)
+        half = len(t) // 2
+        tone = np.zeros_like(t)
+        tone[:half] = np.sin(2.0 * np.pi * 587.33 * t[:half]) * np.exp(-8.0 * t[:half])
+        tone[half:] = np.sin(2.0 * np.pi * 440.00 * (t[half:] - t[half])) * np.exp(-10.0 * (t[half:] - t[half]))
+        pcm = np.clip(tone * 7500.0, -32768, 32767).astype(np.int16)
+        return pcm.tobytes()
+
+    def play_stop_confirmation(self) -> bytes:
+        """Queues the pre-synthesized 24kHz stop confirmation PCM into the hardware output stream if active."""
+        self.stop_confirmation_played_count += 1
+        if self._output_stream is not None and self.cached_stop_pcm:
+            self.feed_speaker_audio(self.cached_stop_pcm)
+            self.mark_turn_complete()
+        return self.cached_stop_pcm
+
     def add_preroll_chunk(self, chunk: bytes) -> None:
         """Stores incoming mic chunk in the rolling pre-roll ring buffer."""
         if chunk:
@@ -245,8 +269,10 @@ class AudioManager:
             # so the HUD LVL % bar ALWAYS shows Director Qadir's real-time hardware mic level!
             self.update_mic_levels(rms)
 
-            # Strict Half-Duplex Speaker Lock: ONLY gate pushing audio chunks into mic_queue for Gemini while speaking
-            if not self.is_speaker_locked() and self.should_stream_mic(rms):
+            # Half-Duplex Speaker Lock with Mid-Speech Voice Stop Barge-In:
+            # Normal ambient audio is gated while speaking, but distinct user vocalization
+            # (rms >= self.barge_in_threshold) is allowed into mic_queue so Gemini Live can transcribe "stop".
+            if (not self.is_speaker_locked() and self.should_stream_mic(rms)) or rms >= self.barge_in_threshold:
                 self.add_preroll_chunk(pcm_bytes)
                 self._loop.call_soon_threadsafe(self.mic_queue.put_nowait, pcm_bytes)
         except Exception:

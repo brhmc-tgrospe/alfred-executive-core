@@ -164,15 +164,28 @@ class MemoryStore:
                     aliases TEXT NOT NULL DEFAULT '[]',
                     app_context TEXT DEFAULT '',
                     template_png_path TEXT NOT NULL,
+                    core_png_path TEXT DEFAULT '',
                     hover_template_png_path TEXT DEFAULT '',
                     width INTEGER NOT NULL,
                     height INTEGER NOT NULL,
+                    orb_features TEXT DEFAULT '',
+                    hsv_hist TEXT DEFAULT '',
                     hover_behavior_desc TEXT DEFAULT '',
                     last_seen_x INTEGER DEFAULT -1,
                     last_seen_y INTEGER DEFAULT -1,
                     updated_at_utc8 TEXT NOT NULL
                 );
             """)
+            # Safe schema migrations for existing SQLite databases
+            for col_def in (
+                "core_png_path TEXT DEFAULT ''",
+                "orb_features TEXT DEFAULT ''",
+                "hsv_hist TEXT DEFAULT ''",
+            ):
+                try:
+                    cursor.execute(f"ALTER TABLE visual_ui_memories ADD COLUMN {col_def};")
+                except sqlite3.OperationalError:
+                    pass
             self.conn.commit()
 
     def _init_chroma(self) -> None:
@@ -606,12 +619,15 @@ class MemoryStore:
         height: int,
         aliases: Optional[List[str]] = None,
         app_context: str = "",
+        core_png_path: str = "",
         hover_template_png_path: str = "",
+        orb_features: str = "",
+        hsv_hist: str = "",
         hover_behavior_desc: str = "",
         last_seen_x: int = -1,
         last_seen_y: int = -1,
     ) -> dict:
-        """Saves or updates a visual UI template memory record."""
+        """Saves or updates a visual UI template memory record with adaptive inner-core, ORB, and HSV metadata."""
         norm_key = element_key.strip().lower()
         alias_list = [a.strip().lower() for a in (aliases or []) if a.strip()]
         if norm_key not in alias_list:
@@ -624,23 +640,28 @@ class MemoryStore:
             cursor.execute("""
                 INSERT INTO visual_ui_memories (
                     element_key, aliases, app_context, template_png_path,
-                    hover_template_png_path, width, height, hover_behavior_desc,
+                    core_png_path, hover_template_png_path, width, height,
+                    orb_features, hsv_hist, hover_behavior_desc,
                     last_seen_x, last_seen_y, updated_at_utc8
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(element_key) DO UPDATE SET
                     aliases = excluded.aliases,
                     app_context = excluded.app_context,
                     template_png_path = excluded.template_png_path,
+                    core_png_path = excluded.core_png_path,
                     hover_template_png_path = excluded.hover_template_png_path,
                     width = excluded.width,
                     height = excluded.height,
+                    orb_features = excluded.orb_features,
+                    hsv_hist = excluded.hsv_hist,
                     hover_behavior_desc = excluded.hover_behavior_desc,
                     last_seen_x = excluded.last_seen_x,
                     last_seen_y = excluded.last_seen_y,
                     updated_at_utc8 = excluded.updated_at_utc8;
             """, (
                 norm_key, aliases_json, app_context, template_png_path,
-                hover_template_png_path, width, height, hover_behavior_desc,
+                core_png_path, hover_template_png_path, width, height,
+                orb_features, hsv_hist, hover_behavior_desc,
                 last_seen_x, last_seen_y, updated_utc8
             ))
             self.conn.commit()
@@ -650,9 +671,12 @@ class MemoryStore:
             "aliases": alias_list,
             "app_context": app_context,
             "template_png_path": template_png_path,
+            "core_png_path": core_png_path,
             "hover_template_png_path": hover_template_png_path,
             "width": width,
             "height": height,
+            "orb_features": orb_features,
+            "hsv_hist": hsv_hist,
             "hover_behavior_desc": hover_behavior_desc,
             "last_seen_x": last_seen_x,
             "last_seen_y": last_seen_y,

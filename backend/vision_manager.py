@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import io
+import json
 import logging
 import os
 import sys
@@ -456,8 +457,194 @@ class VisionManager:
         _, enc = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 88])
         return enc.tobytes(), som_dict
 
+    def _compute_hsv_hist(self, bgr_patch: np.ndarray) -> np.ndarray:
+        """Computes a normalized 3D HSV color histogram (8x8x8 bins) for color verification."""
+        if bgr_patch is None or bgr_patch.size == 0:
+            return np.zeros(512, dtype=np.float32)
+        hsv = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1, 2], None, [8, 8, 8], [0, 180, 0, 256, 0, 256])
+        cv2.normalize(hist, hist)
+        return hist.flatten().astype(np.float32)
+
+    def _compare_hsv_hist(self, h1: np.ndarray, h2: np.ndarray) -> float:
+        """Computes correlation between two normalized HSV histograms in [-1.0, 1.0]."""
+        if h1 is None or h2 is None or h1.size == 0 or h2.size == 0 or h1.shape != h2.shape:
+            return 0.0
+        corr = float(cv2.compareHist(h1.astype(np.float32), h2.astype(np.float32), cv2.HISTCMP_CORREL))
+        if np.isnan(corr):
+            diff = float(np.linalg.norm(h1 - h2))
+            return max(0.0, 1.0 - diff)
+        return corr
+
+    def _extract_orb_descriptors(self, bgr_patch: np.ndarray) -> Optional[np.ndarray]:
+        """Extracts ORB keypoint descriptors from a UI patch (upscaling small patches for keypoint stability)."""
+        if bgr_patch is None or bgr_patch.size == 0:
+            return None
+        try:
+            gray = cv2.cvtColor(bgr_patch, cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape[:2]
+            if h < 64 or w < 64:
+                scale = max(64.0 / max(1, h), 64.0 / max(1, w))
+                gray = cv2.resize(
+                    gray,
+                    (int(round(w * scale)), int(round(h * scale))),
+                    interpolation=cv2.INTER_CUBIC,
+                )
+            orb = cv2.ORB_create(nfeatures=64, edgeThreshold=5, patchSize=15, fastThreshold=5)
+            _, des = orb.detectAndCompute(gray, None)
+            if des is None or des.size == 0:
+                gh, gw = gray.shape[:2]
+                grid_kps = [
+                    cv2.KeyPoint(float(gx), float(gy), 15.0)
+                    for gy in (gh * 0.25, gh * 0.5, gh * 0.75)
+                    for gx in (gw * 0.25, gw * 0.5, gw * 0.75)
+                ]
+                _, des = orb.compute(gray, grid_kps)
+            return des
+        except Exception:
+            return None
+
+    def _compute_orb_match_score(self, des1: Optional[np.ndarray], candidate_bgr: np.ndarray) -> float:
+        """Computes normalized ORB BFMatcher similarity score [0.0, 1.0] between stored descriptors and candidate patch."""
+        if des1 is None or des1.size == 0:
+            return 0.0
+        try:
+            des2 = self._extract_orb_descriptors(candidate_bgr)
+            if des2 is None or des2.size == 0:
+                return 0.0
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+            matches = bf.match(des1.astype(np.uint8), des2.astype(np.uint8))
+            if not matches:
+                return 0.0
+            good = [m for m in matches if m.distance < 68]
+            denom = max(1, min(len(des1), len(des2)))
+            return float(min(1.0, len(good) / float(denom)))
+        except Exception:
+            return 0.0
+
+    def _extract_core_crop(self, full_bgr: np.ndarray, ratio: float = 0.65) -> np.ndarray:
+        """Extracts the symmetric central 65% inner core of a template with zero outer background bleed."""
+        fh, fw = full_bgr.shape[:2]
+        core_w = max(12, int(round(fw * ratio)))
+        core_h = max(12, int(round(fh * ratio)))
+        if core_w < fw and (fw - core_w) % 2 != 0:
+            core_w += 1
+        if core_h < fh and (fh - core_h) % 2 != 0:
+            core_h += 1
+        core_w = min(fw, core_w)
+        core_h = min(fh, core_h)
+        cx_off = (fw - core_w) // 2
+        cy_off = (fh - core_h) // 2
+        return full_bgr[cy_off : cy_off + core_h, cx_off : cx_off + core_w].copy()
+
+    def _extract_adaptive_icon_templates(
+        self,
+        cx: int,
+        cy: int,
+        search_size: int = 400,
+        monitor_index: int = 1,
+        fallback_patch: Optional[np.ndarray] = None,
+    ) -> Dict[str, Any]:
+        """Scans a 400x400 region around (cx, cy) using color segmentation, Canny edges, and connected contours
+        to automatically detect the natural bounding box (w, h) of the UI icon or button (from 18x18 up to 380x240).
+
+        Returns:
+            Dict containing 'full_template', 'core_template', 'width', 'height', 'orb_features', and 'hsv_hist'.
+        """
+        raw_pil = self.capture_screen_raw(monitor_index=monitor_index)
+        screen_bgr = cv2.cvtColor(np.array(raw_pil.convert("RGB")), cv2.COLOR_RGB2BGR)
+        sh, sw = screen_bgr.shape[:2]
+
+        cx_c = max(0, min(sw - 1, int(cx)))
+        cy_c = max(0, min(sh - 1, int(cy)))
+
+        half = search_size // 2
+        x1 = max(0, cx_c - half)
+        y1 = max(0, cy_c - half)
+        x2 = min(sw, cx_c + half)
+        y2 = min(sh, cy_c + half)
+
+        roi = screen_bgr[y1:y2, x1:x2]
+        rh, rw = roi.shape[:2]
+        rel_x = cx_c - x1
+        rel_y = cy_c - y1
+
+        # 1. Color segmentation against outer perimeter background median
+        top_b = roi[:6, :, :].reshape(-1, 3)
+        bot_b = roi[max(0, rh - 6) :, :, :].reshape(-1, 3)
+        left_b = roi[:, :6, :].reshape(-1, 3)
+        right_b = roi[:, max(0, rw - 6) :, :].reshape(-1, 3)
+        border_px = np.vstack([top_b, bot_b, left_b, right_b])
+        bg_median = np.median(border_px, axis=0).astype(np.int16)
+
+        color_diff = np.max(np.abs(roi.astype(np.int16) - bg_median), axis=2).astype(np.uint8)
+        fg_mask = (color_diff > 18).astype(np.uint8) * 255
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        closed_fg = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours_fg, _ = cv2.findContours(closed_fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        candidates: List[Tuple[int, int, int, int]] = []
+        max_bw = min(385, rw - 2)
+        max_bh = min(385, rh - 2)
+
+        for c in contours_fg:
+            bx, by, bw, bh = cv2.boundingRect(c)
+            if 14 <= bw <= max_bw and 14 <= bh <= max_bh:
+                if (bx - 8 <= rel_x <= bx + bw + 8) and (by - 8 <= rel_y <= by + bh + 8):
+                    candidates.append((bx, by, bw, bh))
+
+        # 2. Fallback to Canny edge contours if color segmentation found no enclosing contour
+        if not candidates:
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 40, 120)
+            closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+            contours_edge, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for c in contours_edge:
+                bx, by, bw, bh = cv2.boundingRect(c)
+                if 14 <= bw <= max_bw and 14 <= bh <= max_bh:
+                    if (bx - 8 <= rel_x <= bx + bw + 8) and (by - 8 <= rel_y <= by + bh + 8):
+                        candidates.append((bx, by, bw, bh))
+
+        full_template: Optional[np.ndarray] = None
+        if candidates:
+            # Select contour whose center is closest to (rel_x, rel_y)
+            best_box = min(
+                candidates,
+                key=lambda b: ((b[0] + b[2] / 2.0 - rel_x) ** 2 + (b[1] + b[3] / 2.0 - rel_y) ** 2),
+            )
+            bx, by, bw, bh = best_box
+            full_template = roi[by : by + bh, bx : bx + bw].copy()
+        elif fallback_patch is not None and fallback_patch.size > 0:
+            full_template = fallback_patch.copy()
+        else:
+            def_half = 16
+            bx1 = max(0, rel_x - def_half)
+            by1 = max(0, rel_y - def_half)
+            bx2 = min(rw, bx1 + 32)
+            by2 = min(rh, by1 + 32)
+            full_template = roi[by1:by2, bx1:bx2].copy()
+
+        fh, fw = full_template.shape[:2]
+        core_template = self._extract_core_crop(full_template, ratio=0.65)
+
+        hsv_arr = self._compute_hsv_hist(core_template)
+        hsv_json = json.dumps([round(float(v), 5) for v in hsv_arr.tolist()])
+
+        orb_des = self._extract_orb_descriptors(full_template)
+        orb_json = json.dumps(orb_des.tolist()) if orb_des is not None and orb_des.size > 0 else "[]"
+
+        return {
+            "full_template": full_template,
+            "core_template": core_template,
+            "width": int(fw),
+            "height": int(fh),
+            "orb_features": orb_json,
+            "hsv_hist": hsv_json,
+        }
+
     def _match_learned_visual_template(self, target_query: str) -> Optional[Dict[str, Any]]:
-        """Multi-scale OpenCV template matching against learned visual UI memories."""
+        """Multi-stage 11-scale OpenCV template, HSV histogram, and ORB feature matching against learned visual UI memories."""
         if not hasattr(self, "memory") or self.memory is None:
             return None
         if not hasattr(self.memory, "get_visual_ui_memory"):
@@ -472,67 +659,145 @@ class VisionManager:
             return None
 
         try:
-            template = cv2.imread(tpl_path, cv2.IMREAD_COLOR)
-            if template is None or template.size == 0:
+            full_template = cv2.imread(tpl_path, cv2.IMREAD_COLOR)
+            if full_template is None or full_template.size == 0:
                 return None
+
+            core_path = mem.get("core_png_path", "")
+            if core_path and os.path.exists(core_path):
+                core_template = cv2.imread(core_path, cv2.IMREAD_COLOR)
+                if core_template is None or core_template.size == 0:
+                    core_template = self._extract_core_crop(full_template, ratio=0.65)
+            else:
+                core_template = self._extract_core_crop(full_template, ratio=0.65)
 
             screen_pil = self._grab_raw_image()
             if screen_pil is None:
                 return None
             screen_bgr = cv2.cvtColor(np.array(screen_pil), cv2.COLOR_RGB2BGR)
 
-            th, tw = template.shape[:2]
+            th, tw = full_template.shape[:2]
             sh, sw = screen_bgr.shape[:2]
             if th > sh or tw > sw:
                 return None
 
-            best_max_val = -1.0
-            best_match_loc = (0, 0)
+            core_hist = self._compute_hsv_hist(core_template)
+            full_hist = self._compute_hsv_hist(full_template)
+
+            stored_orb_des: Optional[np.ndarray] = None
+            orb_str = mem.get("orb_features", "")
+            if orb_str:
+                try:
+                    orb_list = json.loads(orb_str)
+                    if orb_list:
+                        stored_orb_des = np.array(orb_list, dtype=np.uint8)
+                except Exception:
+                    stored_orb_des = None
+            if stored_orb_des is None:
+                stored_orb_des = self._extract_orb_descriptors(full_template)
+
+            scales = [0.5, 0.65, 0.75, 0.85, 0.92, 1.0, 1.08, 1.15, 1.3, 1.6, 2.0]
+            tiers = [
+                ("core", core_template, core_hist),
+                ("full", full_template, full_hist),
+            ]
+
+            best_score = -1.0
+            best_ncc = -1.0
+            best_hsv = 0.0
+            best_center = (0, 0)
+            best_rect = (0, 0, tw, th)
             best_scale = 1.0
-            best_scaled_size = (tw, th)
+            best_tier = "full"
 
-            scales = [0.85, 1.0, 1.15]
-            for s in scales:
-                sw_scaled = int(round(tw * s))
-                sh_scaled = int(round(th * s))
-                if sw_scaled > sw or sh_scaled > sh or sw_scaled < 4 or sh_scaled < 4:
-                    continue
+            for tier_name, tpl_img, tpl_hist in tiers:
+                t_h, t_w = tpl_img.shape[:2]
+                for s in scales:
+                    sw_s = int(round(t_w * s))
+                    sh_s = int(round(t_h * s))
+                    if sw_s > sw or sh_s > sh or sw_s < 6 or sh_s < 6:
+                        continue
 
-                if s == 1.0:
-                    scaled_tpl = template
-                else:
-                    scaled_tpl = cv2.resize(
-                        template,
-                        (sw_scaled, sh_scaled),
-                        interpolation=cv2.INTER_AREA if s < 1.0 else cv2.INTER_LINEAR,
-                    )
+                    if s == 1.0:
+                        scaled_tpl = tpl_img
+                    else:
+                        scaled_tpl = cv2.resize(
+                            tpl_img,
+                            (sw_s, sh_s),
+                            interpolation=cv2.INTER_AREA if s < 1.0 else cv2.INTER_LINEAR,
+                        )
 
-                res = cv2.matchTemplate(screen_bgr, scaled_tpl, cv2.TM_CCOEFF_NORMED)
-                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                    res = cv2.matchTemplate(screen_bgr, scaled_tpl, cv2.TM_CCOEFF_NORMED)
 
-                if max_val > best_max_val:
-                    best_max_val = max_val
-                    best_match_loc = max_loc
-                    best_scale = s
-                    best_scaled_size = (sw_scaled, sh_scaled)
+                    # Evaluate up to 3 top peaks so wrong-colored background clutter never masks the true icon
+                    res_work = None
+                    for peak_idx in range(3):
+                        cur_map = res if res_work is None else res_work
+                        _, max_val, _, max_loc = cv2.minMaxLoc(cur_map)
+                        if max_val < 0.55:
+                            break
+
+                        bx, by = max_loc
+                        cand_patch = screen_bgr[by : by + sh_s, bx : bx + sw_s]
+                        cand_hist = self._compute_hsv_hist(cand_patch)
+                        hsv_corr = self._compare_hsv_hist(tpl_hist, cand_hist)
+
+                        # Verified threshold: ncc >= 0.68 with hsv_corr >= 0.70, OR high ncc >= 0.80
+                        is_verified = (max_val >= 0.68 and hsv_corr >= 0.70) or (max_val >= 0.80 and hsv_corr >= 0.45)
+                        if is_verified:
+                            orb_score = 0.0
+                            if tw >= 60 or th >= 45:
+                                orb_score = self._compute_orb_match_score(stored_orb_des, cand_patch)
+
+                            score = 0.70 * float(max_val) + 0.30 * max(0.0, hsv_corr) + 0.03 * orb_score
+                            # Full bounding-box alignment bonus when full border matches strongly
+                            if tier_name == "full" and max_val >= 0.82:
+                                score += 0.04
+
+                            if score > best_score:
+                                best_score = score
+                                best_ncc = float(max_val)
+                                best_hsv = float(hsv_corr)
+                                cx = int(round(bx + sw_s / 2.0))
+                                cy = int(round(by + sh_s / 2.0))
+                                best_center = (cx, cy)
+                                best_rect = (bx, by, sw_s, sh_s)
+                                best_scale = s
+                                best_tier = tier_name
+                            break
+
+                        # Suppress rejected peak and check next peak
+                        if peak_idx < 2:
+                            if res_work is None:
+                                res_work = res.copy()
+                            sup_x1 = max(0, bx - max(4, sw_s // 2))
+                            sup_y1 = max(0, by - max(4, sh_s // 2))
+                            sup_x2 = min(res_work.shape[1], bx + max(4, sw_s // 2))
+                            sup_y2 = min(res_work.shape[0], by + max(4, sh_s // 2))
+                            res_work[sup_y1:sup_y2, sup_x1:sup_x2] = -1.0
 
             logger.info(
-                "[Visual Template Match] Query '%s' -> template '%s' best match val: %.3f (scale: %.2f)",
-                target_query, mem.get("element_key", ""), best_max_val, best_scale
+                "[Visual Template Match] Query '%s' -> '%s' best tier=%s ncc=%.3f hsv=%.3f score=%.3f (scale=%.2f)",
+                target_query,
+                mem.get("element_key", ""),
+                best_tier,
+                best_ncc,
+                best_hsv,
+                best_score,
+                best_scale,
             )
 
-            if best_max_val >= 0.75:
-                bx, by = best_match_loc
-                bw, bh = best_scaled_size
-                cx = int(round(bx + bw / 2.0))
-                cy = int(round(by + bh / 2.0))
+            if best_score >= 0.68 and best_ncc >= 0.68:
                 return {
                     "found": True,
-                    "center": (cx, cy),
+                    "center": best_center,
                     "tag": mem.get("element_key", ""),
-                    "label": f"Learned Visual Template: {mem.get('element_key', '')} (conf={best_max_val:.2f})",
-                    "rect": (bx, by, bw, bh),
-                    "confidence": float(best_max_val),
+                    "label": (
+                        f"Learned Visual Template: {mem.get('element_key', '')} "
+                        f"(tier={best_tier}, scale={best_scale:.2f}, conf={best_ncc:.2f}, hsv={best_hsv:.2f})"
+                    ),
+                    "rect": best_rect,
+                    "confidence": float(max(best_ncc, min(1.0, best_score))),
                 }
         except Exception as e:
             logger.warning("[Visual Template Match] Error matching template for '%s': %s", target_query, e)

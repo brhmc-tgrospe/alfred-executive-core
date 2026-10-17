@@ -321,28 +321,60 @@ class AlfredLiveCore:
         self.audio_manager.clear_playback()
         self.set_status("listening")
 
-    def abort_current_operations(self) -> str:
-        """Instantly aborts active audio playback, background overwatch, and transitions to listening."""
+    def abort_current_operations(self, speak_confirmation: bool = True) -> str:
+        """Instantly aborts active audio playback, background overwatch, and transitions to listening with spoken confirmation."""
         logger.info("[A.L.F.R.E.D.] Aborting active operations on Director command.")
         self._model_turn_open = False
         self._shutdown_pending = False
+        self._startup_briefing_completed.set()
         self._disarm_thinking_watchdog()
         self._disarm_speaking_watchdog()
         if self._drain_task and not self._drain_task.done():
             self._drain_task.cancel()
         self.audio_manager.clear_playback()
         self.stop_game_overwatch()
+        self.set_active_tool(None)
         self.set_status("listening")
         ack = "Stopped, Director Qadir. Standing by for your next command."
         self.update_transcript(ack)
+
+        if speak_confirmation:
+            try:
+                if hasattr(self.audio_manager, "play_stop_confirmation"):
+                    self.audio_manager.play_stop_confirmation()
+            except Exception as e:
+                logger.debug("play_stop_confirmation error: %s", e)
+
+            if self._session is not None and self.is_running:
+                stop_directive = (
+                    '[SYSTEM DIRECTIVE: You were just told to stop. Reply out loud in 1 short sentence: '
+                    '"Stopped, Director Qadir. Standing by for your next command."]'
+                )
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._dispatch_spoken_stop_directive(stop_directive))
+                except RuntimeError:
+                    pass
+
         if hasattr(self, "on_abort_operations") and self.on_abort_operations:
             try:
                 res = self.on_abort_operations()
                 if inspect.isawaitable(res):
-                    asyncio.create_task(res)
+                    try:
+                        asyncio.get_running_loop().create_task(res)
+                    except RuntimeError:
+                        pass
             except Exception as e:
                 logger.debug("on_abort_operations error: %s", e)
         return ack
+
+    async def _dispatch_spoken_stop_directive(self, directive: str) -> None:
+        """Asynchronously sends the spoken stop confirmation directive to Gemini Live."""
+        if self._session is not None and self.is_running:
+            try:
+                await self._session.send(input=directive, end_of_turn=True)
+            except Exception as e:
+                logger.debug("Failed to send spoken stop directive to Live session: %s", e)
 
     def handle_overwatch_request(self, window_title: str, enable: bool, auto_assist_keys: str) -> None:
         """Callback invoked when observe_game_state requests continuous overwatch background polling."""
@@ -688,8 +720,12 @@ class AlfredLiveCore:
            - Sends session.send_realtime_input(audio_stream_end=True) (with fallback)
            - Resets speaking state and transitions status to 'thinking' (armed with 8.0s watchdog).
         """
-        # Wait until startup briefing completes before streaming any microphone input
-        await self._startup_briefing_completed.wait()
+        # Wait until startup briefing completes (bounded to at most 4.0s so microphone never deadlocks on boot)
+        try:
+            await asyncio.wait_for(self._startup_briefing_completed.wait(), timeout=4.0)
+        except asyncio.TimeoutError:
+            logger.info("[ALFRED CORE] Startup briefing wait reached 4.0s limit; auto-unlocking microphone.")
+            self._startup_briefing_completed.set()
 
         # Drain any stale mic chunks that queued during startup
         while not self.audio_manager.mic_queue.empty():
@@ -713,19 +749,23 @@ class AlfredLiveCore:
 
                 self.meeting_logistics.cache_audio_buffer(chunk)
 
-                # Drop mic chunks and reset VAD whenever ALFRED is speaking, speaker locked,
-                # model turn is open, or status is not listening
+                raw_rms = calculate_rms(chunk)
+                visual_level = getattr(self.audio_manager, "visual_mic_level", 0.0)
+
+                # While ALFRED is speaking, speaker locked, or model turn is open:
+                # only forward distinct user vocalization above barge-in threshold so Gemini Live
+                # can transcribe mid-speech "stop" commands via input_audio_transcription.
                 if (
                     self.status != "listening"
                     or self.audio_manager.is_speaker_locked()
                     or getattr(self, "_model_turn_open", False)
                 ):
+                    if raw_rms >= self.audio_manager.barge_in_threshold or visual_level >= 0.65:
+                        await self._send_realtime_audio(session, chunk)
                     user_is_speaking = False
                     quiet_start_time = None
                     continue
 
-                raw_rms = calculate_rms(chunk)
-                visual_level = getattr(self.audio_manager, "visual_mic_level", 0.0)
                 is_speech_level = (visual_level >= 0.15 or raw_rms >= 0.005)
 
                 if not user_is_speaking:
@@ -833,26 +873,37 @@ class AlfredLiveCore:
                     self.set_status("listening")
                     return
 
-            # 1b. Check user turn / audio transcription for stop commands or executive termination commands
+            # 1b. Check both user_turn AND input_transcription for stop commands or executive termination commands
+            user_texts: List[str] = []
             user_turn = getattr(server_content, "user_turn", None)
             if user_turn is not None:
                 for part in getattr(user_turn, "parts", []):
                     u_text = getattr(part, "text", "") or ""
-                    if u_text:
-                        self.last_user_utterance = u_text
-                        if hasattr(self, "on_user_utterance") and self.on_user_utterance:
-                            try:
-                                self.on_user_utterance(u_text)
-                            except Exception:
-                                pass
+                    if u_text.strip():
+                        user_texts.append(u_text.strip())
 
-                        if is_shutdown_authorized(u_text):
-                            logger.warning("[ALFRED CORE] Termination directive detected in user speech transcription: '%s'", u_text)
-                            if not self._shutdown_pending:
-                                self.trigger_graceful_shutdown()
-                        elif is_stop_command(u_text):
-                            logger.info("[ALFRED CORE] Task stop detected in user speech transcription: '%s'", u_text)
-                            self.abort_current_operations()
+            input_transcription = getattr(server_content, "input_transcription", None)
+            if input_transcription is not None:
+                t_text = getattr(input_transcription, "text", "") or ""
+                if t_text.strip():
+                    user_texts.append(t_text.strip())
+
+            for u_text in user_texts:
+                self.last_user_utterance = u_text
+                if hasattr(self, "on_user_utterance") and self.on_user_utterance:
+                    try:
+                        self.on_user_utterance(u_text)
+                    except Exception:
+                        pass
+
+                if is_shutdown_authorized(u_text):
+                    logger.warning("[ALFRED CORE] Termination directive detected in user speech transcription: '%s'", u_text)
+                    if not self._shutdown_pending:
+                        self.trigger_graceful_shutdown()
+                elif is_stop_command(u_text):
+                    logger.info("[ALFRED CORE] Task stop detected in user speech transcription: '%s'", u_text)
+                    self.abort_current_operations(speak_confirmation=True)
+                    return
 
             # 2. Output audio chunks & transcripts
             model_turn = getattr(server_content, "model_turn", None)
@@ -874,6 +925,7 @@ class AlfredLiveCore:
             # Do NOT treat generation_complete as turn_complete, because audio is still streaming over the wire.
             if getattr(server_content, "turn_complete", False):
                 self._model_turn_open = False
+                self._startup_briefing_completed.set()
                 self._disarm_thinking_watchdog()
                 self.audio_manager.mark_turn_complete()
                 # Run buffer drain monitoring non-blockingly
@@ -883,7 +935,6 @@ class AlfredLiveCore:
                     self._disarm_speaking_watchdog()
                     next_status = "listening" if self.audio_manager.ptt_active else "idle"
                     self.set_status(next_status)
-                    self._startup_briefing_completed.set()
 
         # 4. Tool Calls Dispatching
         tool_call = getattr(response, "tool_call", None)
@@ -955,12 +1006,18 @@ class AlfredLiveCore:
             if not success:
                 self._startup_briefing_completed.set()
                 self.set_status("listening")
+            else:
+                try:
+                    await asyncio.wait_for(self._startup_briefing_completed.wait(), timeout=3.5)
+                except asyncio.TimeoutError:
+                    pass
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.warning("[ALFRED CORE] Delayed startup briefing encountered error: %s", e)
-            self._startup_briefing_completed.set()
             self.set_status("listening")
+        finally:
+            self._startup_briefing_completed.set()
 
     async def start(self) -> None:
         """Starts the Gemini Multimodal Live API bidirectional session."""
